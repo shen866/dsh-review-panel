@@ -1,0 +1,33 @@
+# Profile layer for dsh-code-review.
+#
+# `dsh plugin --profile <p> add -w <path>` promotes this package into
+# dsh.profile.bundles; this file is then composed as that bundle's layer.
+#
+# A row has exactly EIGHT legal keys:
+#   id, name, config, group, disabled, inject   (loader EntryOptions)
+#   intercept, isolate                          (added by the loader's isolate module)
+# Nothing else is legal.
+#   id        - stable, short, kebab-case. Later patch layers target THIS.
+#   name      - the INSTALLED PACKAGE NAME plus sub-entry. Node must resolve it.
+#   config    - every key is optional; the entry's Config schema supplies defaults.
+#   inject    - EVERY entry is required and blocking. Never list a cordis core
+#               member (logger, events, reflect, registry, fiber, root).
+#
+# Three entries, one bundle:
+#   review-panel      - the ReviewPanel service (ctx.reviewPanel)
+#   review-panel-web  - the JSON API behind the sidebar panel (web profile only)
+#   code-reviewer     - the code_review agent tool
+- insert:
+    - id: review-panel
+      name: dsh-code-review
+      config:
+        defaultBaseBranch: main
+        maxPatchBytes: 524288
+    - id: review-panel-web
+      name: dsh-code-review/web
+      inject: [reviewPanel]
+    - id: code-reviewer
+      name: dsh-code-review/tool
+      inject: [reviewPanel]
+      config:
+        defaultScope: working-tree
