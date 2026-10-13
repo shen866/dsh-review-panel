@@ -13,10 +13,9 @@
 #   inject    - EVERY entry is required and blocking. Never list a cordis core
 #               member (logger, events, reflect, registry, fiber, root).
 #
-# Three entries, one bundle:
+# Two entries, one bundle:
 #   review-panel      - the ReviewPanel service (ctx.reviewPanel)
 #   review-panel-web  - the JSON API behind the sidebar panel (web profile only)
-#   code-reviewer     - the code_review agent tool
 - insert:
     - id: review-panel
       name: dsh-code-review
@@ -26,8 +25,3 @@
     - id: review-panel-web
       name: dsh-code-review/web
       inject: [reviewPanel]
-    - id: code-reviewer
-      name: dsh-code-review/tool
-      inject: [reviewPanel]
-      config:
-        defaultScope: working-tree

@@ -1,14 +1,13 @@
 {
   "name": "dsh-code-review",
   "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: collects code changes, shows them in a right-sidebar panel, and exposes a code_review agent tool.",
+  "description": "DeepSeek Harness plugin: collects code changes, shows them in a right-sidebar panel, and reviews them with an independent subagent.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
     "./web": "./dist/web.js",
-    "./tool": "./dist/tool/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
@@ -47,12 +46,10 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-tools": "0.1.5-rc.1",
     "@deepseek-ai/schemastery": "3.18.2",
     "@types/node": "^24.0.0",
     "typescript": "^5.6.0"
