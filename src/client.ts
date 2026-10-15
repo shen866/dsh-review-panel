@@ -493,13 +493,16 @@ window.__ModuleLoader__.load({
       return lines
     }
 
+    /** A diff line hit: the line index plus its display/jump line number. */
+    type LocatedLine = { index: number; lineNo: number | null }
+
     /**
-     * Find the diff line a finding anchors to: same side (`old` targets
-     * removed lines, `new` added/context ones), verbatim quote first with a
-     * trimmed fallback, and the advisory line number disambiguating duplicate
-     * quotes by proximity. Returns the line index or null.
+     * L1 anchor — find the diff line a finding targets by its quote: same
+     * side (`old` targets removed lines, `new` added/context ones), verbatim
+     * quote first with a trimmed fallback, and the advisory line number
+     * disambiguating duplicate quotes by proximity.
      */
-    function locateLine(lines: DiffLine[], finding: ReviewFinding): number | null {
+    function locateLine(lines: DiffLine[], finding: ReviewFinding): LocatedLine | null {
       const kinds = finding.side === 'old' ? ['del'] : ['add', 'ctx']
       let candidates: number[] = []
       for (let i = 0; i < lines.length; i++) {
@@ -512,18 +515,75 @@ window.__ModuleLoader__.load({
         }
       }
       if (candidates.length === 0) return null
-      if (candidates.length === 1 || finding.line === null) return candidates[0]
+      const lineNoOf = (index: number) => {
+        const lineNo = finding.side === 'old' ? lines[index].oldLine : lines[index].newLine
+        return lineNo === undefined ? null : lineNo
+      }
+      if (candidates.length === 1 || finding.line === null) {
+        return { index: candidates[0], lineNo: lineNoOf(candidates[0]) }
+      }
       let best = candidates[0]
       let bestDistance = Infinity
       for (const index of candidates) {
-        const lineNo = finding.side === 'old' ? lines[index].oldLine : lines[index].newLine
+        const lineNo = lineNoOf(index)
         const distance = lineNo === null ? Infinity : Math.abs(lineNo - finding.line)
         if (distance < bestDistance) {
           best = index
           bestDistance = distance
         }
       }
+      return { index: best, lineNo: lineNoOf(best) }
+    }
+
+    /**
+     * L2 anchor — fall back to the advisory line number when quote matching
+     * fails: a normalized (all-whitespace-collapsed) quote match first, then
+     * the side-appropriate line nearest `finding.line` within a small window.
+     */
+    function locateByProximity(lines: DiffLine[], finding: ReviewFinding): LocatedLine | null {
+      const kinds = finding.side === 'old' ? ['del'] : ['add', 'ctx']
+      let candidates: number[] = []
+      for (let i = 0; i < lines.length; i++) {
+        if (kinds.indexOf(lines[i].kind) >= 0) candidates.push(i)
+      }
+      if (candidates.length === 0) return null
+      const lineNoOf = (index: number) => {
+        const lineNo = finding.side === 'old' ? lines[index].oldLine : lines[index].newLine
+        return lineNo === undefined ? null : lineNo
+      }
+      const normalized = (finding.quote || '').replace(/\s+/g, ' ')
+      if (normalized.trim()) {
+        let best: LocatedLine | null = null
+        let bestDistance = Infinity
+        for (const index of candidates) {
+          if (lines[index].content.replace(/\s+/g, ' ') !== normalized) continue
+          const lineNo = lineNoOf(index)
+          const distance = finding.line === null || lineNo === null ? 0 : Math.abs(lineNo - finding.line)
+          if (distance < bestDistance) {
+            best = { index, lineNo }
+            bestDistance = distance
+          }
+        }
+        if (best) return best
+      }
+      if (finding.line === null) return null
+      let best: LocatedLine | null = null
+      let bestDistance = Infinity
+      for (const index of candidates) {
+        const lineNo = lineNoOf(index)
+        if (lineNo === null) continue
+        const distance = Math.abs(lineNo - finding.line)
+        if (distance <= 5 && distance < bestDistance) {
+          best = { index, lineNo }
+          bestDistance = distance
+        }
+      }
       return best
+    }
+
+    /** DOM id of a rendered diff line, the scroll target of location links. */
+    function diffLineDomId(path: string, lineIndex: number): string {
+      return 'dsh-dl-' + path + '-' + lineIndex
     }
 
     /** A finding paired with its index in review.findings (stable across renders). */
@@ -532,56 +592,100 @@ window.__ModuleLoader__.load({
       finding: ReviewFinding
     }
 
+    /** A placed finding: its diff line (null = the file's top card) and line number. */
+    type PlacedFinding = IndexedFinding & {
+      lineIndex: number | null
+      lineNo: number | null
+    }
+
+    /**
+     * Same-file same-title findings collapse into one card so the panel does
+     * not repeat identical issues. The representative is always the member
+     * with the lowest finding index; dedup happens AFTER indexing, so the
+     * marks/everAnchored bookkeeping keyed by finding index never shifts
+     * between renders of the same review. Members keep their own placements
+     * purely to populate the card's "N 处" location list.
+     */
+    type FindingGroup = {
+      rep: IndexedFinding
+      members: PlacedFinding[]
+      count: number
+    }
+
+    /** Group key: path plus whitespace-normalized title (order-stable). */
+    function findingGroupKey(finding: ReviewFinding): string {
+      return finding.path + '' + finding.title.trim().replace(/\s+/g, ' ')
+    }
+
     type FindingPlacement = {
       /** Per-file diff lines, parsed once and shared with the renderer. */
       parsed: Map<string, DiffLine[]>
-      /** Anchored findings: file path -> diff line index -> findings. */
-      perLine: Map<string, Map<number, IndexedFinding[]>>
-      /** Quoteless findings for a file present in the diff. */
-      fileLevel: Map<string, IndexedFinding[]>
-      /** Findings that could not be anchored (code changed since the review). */
-      unanchored: IndexedFinding[]
-      /** Indices of findings placed somewhere in the current diff. */
+      /** Line-anchored groups (L1/L2): file path -> diff line index -> groups. */
+      perLine: Map<string, Map<number, FindingGroup[]>>
+      /** File-top groups (L3): the file is in the diff but no line matched. */
+      fileLevel: Map<string, FindingGroup[]>
+      /** Indices of findings placed at L1/L2/L3 in the current diff. */
       anchored: Set<number>
     }
 
-    /** Anchor every finding to its diff line, file header, or the fallback list. */
+    /**
+     * Anchor every finding with increasing tolerance: quote match (L1), then
+     * the advisory line number / normalized content (L2), then the top of the
+     * file's diff section (L3). A finding whose file is not in the current
+     * diff at all is not displayed anywhere and stays out of `anchored`, so
+     * the sticky auto-`resolved` logic treats it as gone. Groups are formed
+     * first, but each member locates independently.
+     */
     function placeFindings(findings: ReviewFinding[], sections: Record<string, string>): FindingPlacement {
-      const placement: FindingPlacement = { parsed: new Map(), perLine: new Map(), fileLevel: new Map(), unanchored: [], anchored: new Set() }
+      const placement: FindingPlacement = { parsed: new Map(), perLine: new Map(), fileLevel: new Map(), anchored: new Set() }
+      const groups = new Map<string, IndexedFinding[]>()
       findings.forEach((finding, index) => {
         const entry: IndexedFinding = { index, finding }
-        const section = sections[finding.path]
-        if (!section) {
-          placement.unanchored.push(entry)
-          return
-        }
-        if (!finding.quote) {
-          const list = placement.fileLevel.get(finding.path) || []
-          list.push(entry)
-          placement.fileLevel.set(finding.path, list)
-          placement.anchored.add(index)
-          return
-        }
-        let lines = placement.parsed.get(finding.path)
+        const key = findingGroupKey(finding)
+        const list = groups.get(key)
+        if (list) list.push(entry)
+        else groups.set(key, [entry])
+      })
+      for (const entries of groups.values()) {
+        const path = entries[0].finding.path
+        const section = sections[path]
+        // L4: the file left the diff entirely — hide the whole group.
+        if (!section) continue
+        let lines = placement.parsed.get(path)
         if (!lines) {
           lines = parseFileDiff(section)
-          placement.parsed.set(finding.path, lines)
+          placement.parsed.set(path, lines)
         }
-        const lineIndex = locateLine(lines, finding)
-        if (lineIndex === null) {
-          placement.unanchored.push(entry)
-          return
+        const members: PlacedFinding[] = entries.map((entry) => {
+          let located: LocatedLine | null = null
+          if (entry.finding.quote) {
+            located = locateLine(lines!, entry.finding) || locateByProximity(lines!, entry.finding)
+          }
+          placement.anchored.add(entry.index)
+          return {
+            index: entry.index,
+            finding: entry.finding,
+            lineIndex: located ? located.index : null,
+            lineNo: located ? located.lineNo : null,
+          }
+        })
+        const group: FindingGroup = { rep: entries[0], members, count: entries.length }
+        if (members[0].lineIndex === null) {
+          const list = placement.fileLevel.get(path) || []
+          list.push(group)
+          placement.fileLevel.set(path, list)
+        } else {
+          let perLine = placement.perLine.get(path)
+          if (!perLine) {
+            perLine = new Map()
+            placement.perLine.set(path, perLine)
+          }
+          const lineIndex = members[0].lineIndex!
+          const list = perLine.get(lineIndex) || []
+          list.push(group)
+          perLine.set(lineIndex, list)
         }
-        let perLine = placement.perLine.get(finding.path)
-        if (!perLine) {
-          perLine = new Map()
-          placement.perLine.set(finding.path, perLine)
-        }
-        const list = perLine.get(lineIndex) || []
-        list.push(entry)
-        perLine.set(lineIndex, list)
-        placement.anchored.add(index)
-      })
+      }
       return placement
     }
 
@@ -593,19 +697,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One review finding rendered as a card, inline below its diff line. The
-     * element id anchors the prev/next jump buttons; `mark` dims the card and
-     * swaps the ignore toggle for a status badge.
+     * One finding group rendered as a card, inline below its diff line or at
+     * the file's top. The element id anchors the prev/next jump buttons and
+     * uses the representative's index; `mark` dims the card and swaps the
+     * ignore toggle for a status badge. A deduped group lists its other
+     * anchored occurrences as clickable line-number links.
      */
     function findingCard(
-      entry: IndexedFinding,
+      group: FindingGroup,
       key: string | number,
       mark: FindingMark | undefined,
       active: boolean,
       onToggleIgnore: (index: number) => void,
+      onJumpLine: (path: string, lineIndex: number) => void,
     ) {
+      const entry = group.rep
       const finding = entry.finding
       const severity = SEVERITY_BADGES[finding.severity] || SEVERITY_BADGES.normal
+      const locations = group.count > 1
+        ? group.members.filter((member) => member.lineIndex !== null && member.lineNo !== null)
+        : []
       return h('div', {
         key: key,
         id: 'dsh-finding-' + entry.index,
@@ -631,7 +742,15 @@ window.__ModuleLoader__.load({
             title: mark === 'ignored' ? '恢复这条检视意见' : '忽略这条检视意见',
             onClick: (event: any) => { event.stopPropagation(); onToggleIgnore(entry.index) },
           }, mark === 'ignored' ? '恢复' : '忽略')),
-        finding.detail ? h('div', { style: styles.findingDetail }, finding.detail) : null)
+        finding.detail ? h('div', { style: styles.findingDetail }, finding.detail) : null,
+        group.count > 1 ? h('div', { style: { marginTop: '2px', fontSize: '11px', opacity: .85 } },
+          '此文件中共出现 ' + group.count + ' 处' + (locations.length > 0 ? '：' : ''),
+          locations.map((member, i) => h('button', {
+            key: 'loc-' + i,
+            style: Object.assign({}, styles.jumpButton, { padding: '0 4px', fontSize: '10px' }),
+            title: '跳转到该处代码',
+            onClick: (event: any) => { event.stopPropagation(); onJumpLine(finding.path, member.lineIndex!) },
+          }, '第 ' + member.lineNo + ' 行'))) : null)
     }
 
     function badge(status: string) {
@@ -649,9 +768,9 @@ window.__ModuleLoader__.load({
       lines: DiffLine[] | undefined,
       closed: boolean,
       onToggle: () => void,
-      perLine?: Map<number, IndexedFinding[]>,
-      fileLevel?: IndexedFinding[],
-      renderFinding?: (entry: IndexedFinding, key: string | number) => any,
+      perLine?: Map<number, FindingGroup[]>,
+      fileLevel?: FindingGroup[],
+      renderFinding?: (group: FindingGroup, key: string | number) => any,
     ) {
       const children = [
         h('div', {
@@ -678,11 +797,12 @@ window.__ModuleLoader__.load({
       if (!closed && lines) {
         const body: any[] = []
         if (fileLevel && fileLevel.length > 0 && renderFinding) {
-          fileLevel.forEach((entry, index) => { body.push(renderFinding(entry, 'file-' + index)) })
+          fileLevel.forEach((group, index) => { body.push(renderFinding(group, 'file-' + index)) })
         }
         lines.forEach((line, index) => {
           body.push(h('div', {
             key: 'line-' + index,
+            id: diffLineDomId(file.path, index),
             style: Object.assign({}, styles.diffLine, diffLineStyle(line)),
           },
             h('span', { style: styles.gutter }, line.oldLine === null ? '' : String(line.oldLine)),
@@ -690,7 +810,7 @@ window.__ModuleLoader__.load({
             line.kind === 'hunk' ? line.content : line.content || ' '))
           const anchored = perLine && perLine.get(index)
           if (anchored && renderFinding) {
-            anchored.forEach((entry, i) => { body.push(renderFinding(entry, 'f-' + index + '-' + i)) })
+            anchored.forEach((group, i) => { body.push(renderFinding(group, 'f-' + index + '-' + i)) })
           }
         })
         children.push(h('div', { key: 'body', style: styles.diffBody }, body))
@@ -924,7 +1044,21 @@ window.__ModuleLoader__.load({
                 if (!prev || prev.id !== body.id) return prev
                 return body
               })
-              if (body.status && body.status !== 'running') sync()
+              if (body.status && body.status !== 'running') {
+                if (body.status === 'done') {
+                  // The changes just landed: drop the review (findings can no
+                  // longer anchor to an empty diff) along with its marks so a
+                  // reload cannot resurrect them; the server clears its copy
+                  // of the persisted record.
+                  setReview((prev) => {
+                    if (prev && prev.id) {
+                      try { localStorage.removeItem(MARKS_KEY + prev.id) } catch {}
+                    }
+                    return null
+                  })
+                }
+                sync()
+              }
             }, (err) => {
               failures++
               if (failures < MAX_REVIEW_POLL_FAILURES) return
@@ -988,24 +1122,23 @@ window.__ModuleLoader__.load({
         })
       }, [anchoredNow, reviewFindings])
 
-      // Finding indices in on-screen order: per file (file-level first, then
-      // top to bottom), with the unanchored fallback last. Drives the jump.
+      // Representative indices in on-screen order: per file (file-top cards
+      // first, then top to bottom). Drives the jump buttons.
       const jumpList = react.useMemo(() => {
         if (!reviewFindings || reviewFindings.length === 0) return [] as number[]
         const order: number[] = []
         if (data && placement) {
           for (const file of data.files) {
             const level = placement.fileLevel.get(file.path)
-            if (level) for (const entry of level) order.push(entry.index)
+            if (level) for (const group of level) order.push(group.rep.index)
             const perLine = placement.perLine.get(file.path)
             if (perLine) {
               const lineIndices = Array.from(perLine.keys()).sort((a, b) => a - b)
               for (const lineIndex of lineIndices) {
-                for (const entry of perLine.get(lineIndex)!) order.push(entry.index)
+                for (const group of perLine.get(lineIndex)!) order.push(group.rep.index)
               }
             }
           }
-          for (const entry of placement.unanchored) order.push(entry.index)
         } else {
           for (let i = 0; i < reviewFindings.length; i++) order.push(i)
         }
@@ -1026,6 +1159,13 @@ window.__ModuleLoader__.load({
         }
       }, [jumpList, activeFinding])
 
+      // A group's location link scrolls to that occurrence's diff line.
+      const scrollToDiffLine = react.useCallback((path: string, lineIndex: number) => {
+        if (typeof document === 'undefined') return
+        const el = document.getElementById(diffLineDomId(path, lineIndex))
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, [])
+
       // Severity/mark counts for the stats bar on top of the review box.
       const findingStats = react.useMemo(() => {
         if (!reviewFindings || reviewFindings.length === 0) return null
@@ -1038,9 +1178,9 @@ window.__ModuleLoader__.load({
         return counts
       }, [reviewFindings, marks])
 
-      const renderFinding = react.useCallback((entry: IndexedFinding, key: string | number) => {
-        return findingCard(entry, key, marks[entry.index], activeFinding === entry.index, toggleIgnore)
-      }, [marks, activeFinding, toggleIgnore])
+      const renderFinding = react.useCallback((group: FindingGroup, key: string | number) => {
+        return findingCard(group, key, marks[group.rep.index], activeFinding === group.rep.index, toggleIgnore, scrollToDiffLine)
+      }, [marks, activeFinding, toggleIgnore, scrollToDiffLine])
 
       let header: any = null
       let content: any
@@ -1105,13 +1245,6 @@ window.__ModuleLoader__.load({
         if (review.model) reviewTitle += ' · ' + review.model
         if (review.startedAt) reviewTitle += ' · ' + new Date(review.startedAt).toLocaleString()
         const verdict = review.verdict ? VERDICT_BADGES[review.verdict] : undefined
-        // Findings the anchoring pass could not place (code changed since the
-        // review, or the file left the diff) still surface here, never lost.
-        // Without a loaded diff at all, every finding falls back to this list.
-        const unanchored: IndexedFinding[] = placement ? placement.unanchored
-          : (data && review.status !== 'running' && review.findings
-            ? review.findings.map((finding, index) => ({ index, finding }))
-            : [])
         let reviewBody: any = null
         if (!reviewClosed) {
           if (review.status === 'running') {
@@ -1147,12 +1280,6 @@ window.__ModuleLoader__.load({
               blocks.push(h('pre', { key: 'text', style: styles.reviewText }, review.text))
             } else {
               blocks.push(h('div', { key: 'clean', style: styles.reviewText }, '未发现问题，没有检视意见'))
-            }
-            if (unanchored.length > 0) {
-              blocks.push(h('div', { key: 'unanchored' },
-                h('div', { style: { padding: '0 12px', fontSize: '11px', opacity: .6 } },
-                  '以下意见未能定位到当前代码（可能在检视后已修改）：'),
-                unanchored.map((entry) => renderFinding(entry, 'u-' + entry.index))))
             }
             reviewBody = h('div', null, blocks)
           }

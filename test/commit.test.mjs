@@ -14,7 +14,7 @@ const changeSet = {
 }
 
 function fakeDeps(result, git = {}) {
-  const calls = { created: 0, started: 0, committed: [], pushed: [] }
+  const calls = { created: 0, started: 0, committed: [], pushed: [], cleared: [] }
   return {
     calls,
     agents: () => ({
@@ -34,11 +34,17 @@ function fakeDeps(result, git = {}) {
     agentDefaultModel: () => ({ currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) }),
     async commit(cwd, message) {
       calls.committed.push({ cwd, message })
+      if (git.commitError) throw new Error(git.commitError)
       return git.commitHash ?? 'abc1234'
     },
     async push(cwd) {
       calls.pushed.push(cwd)
       if (git.pushError) throw new Error(git.pushError)
+    },
+    store: {
+      async clear(cwd) {
+        calls.cleared.push(cwd)
+      },
     },
   }
 }
@@ -72,6 +78,7 @@ test('a completed run commits with the generated message and does not push by de
   assert.equal(run.pushed, false)
   assert.deepEqual(deps.calls.committed, [{ cwd: '/repo/a', message: 'fix: 处理空值' }])
   assert.deepEqual(deps.calls.pushed, [])
+  assert.deepEqual(deps.calls.cleared, ['/repo/a'])
 })
 
 test('a push run pushes after committing', async () => {
@@ -93,6 +100,18 @@ test('a push failure keeps the commit and reports pushError', async () => {
   assert.equal(run.commit, 'abc1234')
   assert.equal(run.pushed, false)
   assert.equal(run.pushError, 'no upstream')
+  // The commit stands, so the review record is cleared anyway.
+  assert.deepEqual(deps.calls.cleared, ['/repo/a'])
+})
+
+test('a failing commit never clears the review store', async () => {
+  const deps = fakeDeps(completed('fix: 处理空值'), { commitError: 'nothing to commit' })
+  const runner = new CommitRunner(deps)
+  const run = runner.start(changeSet, { push: false })
+  await run.settled
+  assert.equal(run.status, 'error')
+  assert.equal(run.error, 'nothing to commit')
+  assert.deepEqual(deps.calls.cleared, [])
 })
 
 test('an empty model answer falls back to a generated message', async () => {
@@ -122,6 +141,7 @@ test('a failing subagent errors the run and never touches git', async () => {
   assert.equal(run.error, 'boom')
   assert.deepEqual(deps.calls.committed, [])
   assert.deepEqual(deps.calls.pushed, [])
+  assert.deepEqual(deps.calls.cleared, [])
 })
 
 test('missing agent services fail the run', async () => {

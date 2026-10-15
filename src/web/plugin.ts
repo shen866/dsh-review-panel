@@ -42,6 +42,7 @@ export function apply(ctx: Context) {
     agents: lazy('agents'),
     subagents: lazy('subagents'),
     agentDefaultModel: lazy('agentDefaultModel'),
+    store: ctx.reviewPanel.reviewStore,
   })
 
   // `webServer` is web-profile only, so it is an OPTIONAL dependency reached

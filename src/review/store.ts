@@ -28,10 +28,11 @@ export interface ReviewRecord {
   cwd: string
 }
 
-/** Minimal face consumed by the runner / routes, faked in tests. */
+/** Minimal face consumed by the runner / routes / commit flow, faked in tests. */
 export interface ReviewStoreLike {
   put(cwd: string, record: ReviewRecord): Promise<void>
   get(cwd: string): Promise<ReviewRecord | null>
+  clear(cwd: string): Promise<void>
 }
 
 export class ReviewStore implements ReviewStoreLike {
@@ -87,5 +88,28 @@ export class ReviewStore implements ReviewStoreLike {
   async get(cwd: string): Promise<ReviewRecord | null> {
     const table = await this.read()
     return table[await this.key(cwd)] ?? null
+  }
+
+  /** Drop the repo's record; persistence failures degrade to a no-op. */
+  async clear(cwd: string): Promise<void> {
+    const task = this.chain.then(() => this.remove(cwd)).catch(() => {})
+    this.chain = task
+    await task
+  }
+
+  private async remove(cwd: string): Promise<void> {
+    const table = await this.read()
+    const key = await this.key(cwd)
+    if (!(key in table)) return
+    delete table[key]
+    await mkdir(dirname(this.file), { recursive: true })
+    const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      await writeFile(tmp, JSON.stringify(table))
+      await rename(tmp, this.file)
+    } catch (error) {
+      await rm(tmp, { force: true }).catch(() => {})
+      throw error
+    }
   }
 }

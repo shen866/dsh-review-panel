@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 
 import { commitAll, pushCurrentBranch } from '../service/git.js'
 import type { ChangeSet } from '../service/types.js'
+import type { ReviewStoreLike } from './store.js'
 import type {
   AgentHandleLike,
   ModelSelectionLike,
@@ -45,6 +46,11 @@ export interface CommitRunnerDeps {
   commit?(cwd: string, message: string, signal?: AbortSignal): Promise<string>
   push?(cwd: string, signal?: AbortSignal): Promise<void>
   timeoutMs?: number
+  /**
+   * The review store, cleared after a successful commit so the panel does not
+   * keep showing findings for changes that just landed.
+   */
+  store?: ReviewStoreLike
 }
 
 export const DEFAULT_COMMIT_TIMEOUT_MS = 3 * 60 * 1000
@@ -180,6 +186,7 @@ export class CommitRunner {
         run.pushed = false
       }
       run.status = 'done'
+      if (this.deps.store) await this.deps.store.clear(changeSet.cwd).catch(() => {})
     } catch (error) {
       fail(controller.signal.aborted ? new Error('提交超时或被取消') : error)
     } finally {
