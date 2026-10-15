@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "rm -rf dist lib && tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "build": "rm -rf dist lib && tsc -p tsconfig.json && tsdown",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs"
@@ -52,6 +52,8 @@
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/schemastery": "3.18.2",
     "@types/node": "^24.0.0",
+    "@types/react": "^18.3.31",
+    "tsdown": "^0.23.1",
     "typescript": "^5.6.0"
   }
 }

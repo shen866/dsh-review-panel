@@ -15,5 +15,5 @@
     "rootDir": "src"
   },
   "include": ["src"],
-  "exclude": ["src/client.ts"]
+  "exclude": ["src/client"]
 }

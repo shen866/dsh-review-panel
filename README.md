@@ -14,9 +14,9 @@
   - `POST /review-panel/api/commit/start?session=&push=&provider=&model=` — 自动生成 commit 信息并提交全部变更（`push=1`/`true` 同时推送；`provider`/`model` 规则同检视；同一仓库同时只跑一个）
   - `GET /review-panel/api/commit/status?id=` — 轮询提交结果（`message`、`commit` 短哈希、`pushed`、`pushError`）
 - **智能体检视（`src/review/`）**：`ReviewRunner` 复用官方 webhook 插件的模式——创建一个一次性的 root agent 作为 parent，再经 `ctx.subagents.start('spawn', …)` 启动独立子智能体，把评审 prompt + diff 交给它，等待终局结论文本；10 分钟超时，结束即 dispose。评审回答末尾的 `review-findings` JSON 块由 `parseReviewFindings` 解析为结构化意见（只输出逐条 findings，不再要求总体评价正文；`severity` 分三级：critical=严重 / normal=一般 / suggestion=建议，旧记录的 major/minor 归并为 normal）。检视落定后（成功或失败）经 `ReviewStore` 持久化为该仓库的最新一条记录（`<storageDir>/reviews.json`，按仓库 realpath 覆盖写入，临时文件 + rename 保证原子性），内存中也只保留最新一次 run。`CommitRunner` 走同一 spawn 模式生成 Conventional Commits 格式的 commit 信息（3 分钟超时），随后服务端执行 `git add -A` + `git commit`（可选 `git push`；推送失败不影响已完成的提交，以 `pushError` 上报）。
-- **客户端模块（`src/client.ts` 编译为 `lib/client.js`，`dsh.client` 声明）**：把「代码变更」面板注册为 DSH 原生右侧栏的 tab 类型——类型进 `ctx.sidebarRightTabs`（带 guide 入口），面板体进 `sidebar.right.pane.tab` 槽位。面板只展示当前未提交的变更，每 4 秒自动轮询同步，按文件折叠；diff 按 hunk 解析并带新旧行号、行级着色。头部「开始检视」按钮触发智能体评审，旁边的下拉框可选择检视使用的模型（选项来自 `/review-panel/api/models`，选择持久化到 localStorage，缺省用宿主默认模型）；检视结果区顶部按严重级统计意见数量（严重 / 一般 / 建议，另计已忽略 / 已修改），并提供 ↑/↓ 按钮在意见间快速跳转（高亮当前条并滚动定位）。结构化意见经 `quote` 逐字锚定到 diff 行（`side` 区分新旧，`line` 消歧重复 quote），以严重级彩色卡片渲染在对应代码行下方，有意见的文件自动展开；无 quote 的文件级意见渲染在文件 diff 块顶部；锚定失败的意见（代码在检视后已变化）汇总进结果区底部列表，绝不丢失。每条意见可手动标记「忽略」；曾经锚定、后因代码改动失去锚点的意见自动标记「已修改」——两种标记按检视 id 持久化到 localStorage。面板挂载时经 `/review/latest` 恢复该仓库最近一次检视（进行中的恢复轮询，已落定的直接展示）。底部操作栏提供「提交」「提交并推送」按钮，自动生成 commit 信息并完成提交（推送可选）。展开/收起、分栏、全屏都由右侧面板原生提供。
+- **客户端模块（`src/client/` TSX 编译为 `lib/client.js`，`dsh.client` 声明）**：把「代码变更」面板注册为 DSH 原生右侧栏的 tab 类型——类型进 `ctx.sidebarRightTabs`（带 guide 入口），面板体进 `sidebar.right.pane.tab` 槽位。面板只展示当前未提交的变更，每 4 秒自动轮询同步，按文件折叠；diff 解析与意见锚定是与服务端复用的纯逻辑（`src/shared/diff.ts`，两端共用、有单测），渲染层带新旧行号、行级着色。头部「开始检视」按钮触发智能体评审，旁边的下拉框可选择检视使用的模型（选项来自 `/review-panel/api/models`，选择持久化到 localStorage，缺省用宿主默认模型）；检视结果区顶部按严重级统计意见数量（严重 / 一般 / 建议，另计已忽略 / 已修改），并提供 ↑/↓ 按钮在意见间快速跳转（高亮当前条并滚动定位）。结构化意见经 `quote` 逐字锚定到 diff 行（`side` 区分新旧，`line` 消歧重复 quote），以严重级彩色卡片渲染在对应代码行下方，有意见的文件自动展开；无 quote 的文件级意见渲染在文件 diff 块顶部；锚定失败的意见（代码在检视后已变化）汇总进结果区底部列表，绝不丢失。每条意见可手动标记「忽略」；曾经锚定、后因代码改动失去锚点的意见自动标记「已修改」——两种标记按检视 id 持久化到 localStorage。面板挂载时经 `/review/latest` 恢复该仓库最近一次检视（进行中的恢复轮询，已落定的直接展示）。底部操作栏提供「提交」「提交并推送」按钮，自动生成 commit 信息并完成提交（推送可选）。展开/收起、分栏、全屏都由右侧面板原生提供。
 
-bundle 保持 `window.__ModuleLoader__.load` 格式（与官方包产物一致）：源码是 `src/client.ts`，`pnpm build` 经独立的 `tsconfig.client.json`（script 模式，非 NodeNext）编译为 `lib/client.js`；react 由客户端模块系统的 shell 基座提供。`package.json` 的 `exports["./client"]` 指向该产物，但它是一个由宿主在运行时注入页面的 IIFE script（`module: none`，无任何导出），不提供 `.d.ts` 类型声明——消费方按脚本入口引用即可，不要从它 import 符号。
+bundle 保持 `window.__ModuleLoader__.load` 格式（与官方包产物一致）：源码在 `src/client/`（TSX，React 用自动运行时），`pnpm build` 用 tsdown 打包为 `lib/client.js`——`react` / `react/jsx-runtime` 保持外部 require（由宿主模块表提供），产物头尾由 banner/footer 包出 ModuleLoader 包装；`tsconfig.client.json` 只做类型检查（`noEmit`）。`package.json` 的 `exports["./client"]` 指向该产物，但它是一个由宿主在运行时注入页面的 IIFE script，不提供 `.d.ts` 类型声明——消费方按脚本入口引用即可，不要从它 import 符号。
 
 ## 目录结构
 
@@ -24,14 +24,20 @@ bundle 保持 `window.__ModuleLoader__.load` 格式（与官方包产物一致�
 dsh-plugins/  (= dsh-code-review 包根)
 ├── package.json          # dsh.bundle.patch + dsh.client 声明
 ├── cordis.patch.yml      # 一个 bundle 两个入口：review-panel / review-panel-web
-├── tsconfig.json         # NodeNext ESM
-├── tsconfig.client.json  # 客户端 bundle 编译配置（script 模式，输出 lib/）
+├── tsconfig.json         # NodeNext ESM（服务端 dist/）
+├── tsconfig.client.json  # 客户端类型检查配置（noEmit；构建走 tsdown）
 ├── lib/
-│   └── client.js         # 客户端 bundle：由 src/client.ts 编译生成，勿手改
+│   └── client.js         # 客户端 bundle：由 src/client/ 经 tsdown 生成，勿手改
 ├── src/
 │   ├── index.ts          # 服务入口（re-export，默认导出 ReviewPanelService）
 │   ├── web.ts            # web 入口（re-export，函数形态）
-│   ├── client.ts         # 客户端 bundle 源码：注册右侧栏「代码变更」tab
+│   ├── client/           # 客户端 bundle 源码（TSX）
+│   │   ├── index.tsx     #   入口：注册右侧栏「代码变更」tab 类型与面板体
+│   │   ├── panel.tsx     #   面板主体：轮询、检视/提交流程、跳转与标记
+│   │   ├── diff-view.tsx #   diff 渲染：文件折叠、行级着色、意见卡片、样式
+│   │   └── api.ts        #   JSON API 形状与 readJson（复用服务端类型）
+│   ├── shared/
+│   │   └── diff.ts       # 纯逻辑：diff 解析、意见锚定、severity 归并（两端复用，有单测）
 │   ├── config.ts         # 服务 Config（Schemastery，公开契约）
 │   ├── service/          # 服务实现
 │   │   ├── index.ts      #   ReviewPanelService（Service 类形态）
@@ -45,7 +51,7 @@ dsh-plugins/  (= dsh-code-review 包根)
 │   └── web/              # Web 后端实现
 │       ├── plugin.ts     #   apply：注册 JSON API 路由 + 装配 ReviewRunner / CommitRunner
 │       └── routes.ts     #   /review-panel/api/changes + /models + /review/* + /commit/*
-└── test/                 # git / routes / runner / commit / store / service 六组单测
+└── test/                 # git / routes / runner / commit / store / service / diff 七组单测
 ```
 
 ## 检视范围（ReviewScope）
@@ -67,12 +73,12 @@ dsh-plugins/  (= dsh-code-review 包根)
 ## 设计要点
 
 - **服务形态**：对外提供能力必须用类形态——`ReviewPanelService extends Service`，`super(ctx, 'reviewPanel')`，并通过声明合并把类型挂到 `Context` 上。
-- **UI 架构**：面板 UI 以客户端模块（`dsh.client` 声明 + `lib/client.js`，由 `src/client.ts` 编译）注册为 DSH 原生右侧栏的 tab 类型；后端通过 `webServer` 路由提供 JSON API；`webServer` 仅 web profile 存在，故用 `ctx.inject(['webServer'], cb)` 可选加载。
+- **UI 架构**：面板 UI 以客户端模块（`dsh.client` 声明 + `lib/client.js`，由 `src/client/` 经 tsdown 打包）注册为 DSH 原生右侧栏的 tab 类型；后端通过 `webServer` 路由提供 JSON API；`webServer` 仅 web profile 存在，故用 `ctx.inject(['webServer'], cb)` 可选加载。
 - **仓库定位**：面板不接收仓库路径输入——槽位是 session 作用域，框架给面板组件注入 `sessionId`，前端以 `?session=` 传给 API，服务端经 `workspaceRegistry` 把 session 解析为其工作区的仓库路径（按请求惰性解析，规避启动时序）；无 session 时回退 `process.cwd()`。
 - **自动同步**：面板每 4 秒轮询 API，按 diff 内容快照比对，只在变更真正变化时重渲染；页面隐藏时暂停轮询。
 - **独立智能体**：评审不占用当前会话——`ReviewRunner` 创建一个一次性 root agent 作 parent，再 spawn 子智能体执行评审（模型经 spawn 请求的 `agentOptions` 显式指定，覆盖默认的父代继承）；`agents` / `subagents` / `agentDefaultModel` 均按请求惰性解析。
 - **检视记录持久化**：cordis 没有 `storageDomain` 服务，故持久化用文件实现——`ReviewStore` 把每仓库最新一次检视记录写入 `<storageDir>/reviews.json`（单文件表，键为仓库 realpath，临时文件 + rename 原子替换）；写盘失败只静默降级，绝不影响检视本身。runner 落定时写入，面板挂载时经 `/review/latest` 恢复。
-- **意见锚定**：`ReviewFinding` 用 `path` + `quote`（逐字 diff 行内容，先精确后 trim 宽松匹配）+ `side`（new→add/ctx，old→del）+ 可选 `line`（重复 quote 时按行号距离消歧）定位到结构化 diff 行；前端 `parseFileDiff` 解析 `@@ -a,b +c,d @@` 头维护新旧行号。
+- **意见锚定**：`ReviewFinding` 用 `path` + `quote`（逐字 diff 行内容，先精确后 trim 宽松匹配）+ `side`（new→add/ctx，old→del）+ 可选 `line`（重复 quote 时按行号距离消歧）定位到结构化 diff 行；`src/shared/diff.ts` 的 `parseFileDiff` 解析 `@@ -a,b +c,d @@` 头维护新旧行号，锚定逻辑与客户端/单测共用。
 - **生命周期**：`webServer.register` 返回的 disposer 不由 fiber 托管，均包进 `ctx.effect()`。
 
 ## 开发
