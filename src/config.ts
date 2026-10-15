@@ -11,6 +11,8 @@ export interface Config {
   defaultBaseBranch: string
   /** Patches longer than this (bytes) are truncated and flagged, never silently. */
   maxPatchBytes: number
+  /** Directory holding the persisted latest review record per repo. */
+  storageDir: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -21,4 +23,7 @@ export const Config: Schema<Config> = Schema.object({
     .min(1024)
     .default(512 * 1024)
     .description('Maximum patch size in bytes. Longer patches are truncated and flagged.'),
+  storageDir: Schema.string()
+    .default('~/.dsh-code-review')
+    .description('Directory where the latest review record per repo is persisted.'),
 })

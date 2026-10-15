@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
+import { realpath } from 'node:fs/promises'
 import test from 'node:test'
 
-import { changesRoute } from '../dist/web/routes.js'
+import {
+  changesRoute,
+  commitStartRoute,
+  commitStatusRoute,
+  modelsRoute,
+  reviewLatestRoute,
+  reviewStartRoute,
+  reviewStatusRoute,
+} from '../dist/web/routes.js'
 
 function mockRes() {
   return {
@@ -28,10 +37,30 @@ test('session id resolves to the session workspace path', async () => {
   const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
   const route = changesRoute(service, workspaces)
   const res = mockRes()
-  await route.handler({ url: '/review-panel/api/changes?scope=working-tree&session=s-1' }, res)
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes?scope=working-tree&session=s-1' }, res)
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.cwd, '/repo/a')
   assert.equal(service.calls[0].cwd, '/repo/a')
+})
+
+test('the session workspace path is realpath-normalized', async () => {
+  const service = fakeService()
+  const workspaces = () => ({ list: () => [{ path: '/tmp', sessionIds: ['s-1'] }] })
+  const route = changesRoute(service, workspaces)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes?session=s-1' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(service.calls[0].cwd, await realpath('/tmp'))
+})
+
+test('a session request is 503 while the workspace registry is unavailable', async () => {
+  const service = fakeService()
+  const route = changesRoute(service, () => undefined)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes?session=s-1' }, res)
+  assert.equal(res.statusCode, 503)
+  assert.match(res.body.error, /workspace registry unavailable/)
+  assert.equal(service.calls.length, 0)
 })
 
 test('unknown session id is a 400', async () => {
@@ -39,22 +68,39 @@ test('unknown session id is a 400', async () => {
   const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
   const route = changesRoute(service, workspaces)
   const res = mockRes()
-  await route.handler({ url: '/review-panel/api/changes?session=nope' }, res)
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes?session=nope' }, res)
   assert.equal(res.statusCode, 400)
   assert.match(res.body.error, /no workspace found/)
   assert.equal(service.calls.length, 0)
+})
+
+test('changes route rejects an invalid scope with 400', async () => {
+  const route = changesRoute(fakeService())
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes?scope=bogus' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /invalid scope/)
 })
 
 test('without a session the route falls back to process.cwd()', async () => {
   const service = fakeService()
   const route = changesRoute(service)
   const res = mockRes()
-  await route.handler({ url: '/review-panel/api/changes' }, res)
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes' }, res)
   assert.equal(res.statusCode, 200)
   assert.equal(service.calls[0].cwd, process.cwd())
 })
 
-import { reviewStartRoute, reviewStatusRoute } from '../dist/web/routes.js'
+test('route failures return a generic 500 without the internal message', async () => {
+  const service = {
+    async collect() { throw new Error('fatal: bad revision (stderr leaking local paths)') },
+  }
+  const route = changesRoute(service)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes' }, res)
+  assert.equal(res.statusCode, 500)
+  assert.equal(res.body.error, 'internal error')
+})
 
 function fakeRunner() {
   const started = []
@@ -106,6 +152,25 @@ test('review start forwards an explicit provider/model pair', async () => {
   assert.deepEqual(runner.started[0].selection, { provider: 'openai', model: 'gpt-5' })
 })
 
+test('review start treats empty provider/model as absent', async () => {
+  const runner = fakeRunner()
+  const route = reviewStartRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/review/start?provider=&model=' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(runner.started[0].selection, undefined)
+})
+
+test('review start still requires provider and model as a pair', async () => {
+  const runner = fakeRunner()
+  const route = reviewStartRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/review/start?provider=&model=gpt-5' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /同时指定/)
+  assert.equal(runner.started.length, 0)
+})
+
 test('review start rejects a lone provider without model', async () => {
   const runner = fakeRunner()
   const route = reviewStartRoute(fakeServiceWithFiles(), runner)
@@ -136,17 +201,183 @@ test('review start requires POST', async () => {
 test('review status returns the run, 404 for unknown ids', async () => {
   const route = reviewStatusRoute(fakeRunner())
   const ok = mockRes()
-  await route.handler({ url: '/review-panel/api/review/status?id=run-1' }, ok)
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/status?id=run-1' }, ok)
   assert.equal(ok.statusCode, 200)
   assert.equal(ok.body.status, 'done')
   assert.equal(ok.body.text, '结论')
   assert.equal(ok.body.model, 'deepseek/deepseek-chat')
   const missing = mockRes()
-  await route.handler({ url: '/review-panel/api/review/status?id=nope' }, missing)
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/status?id=nope' }, missing)
   assert.equal(missing.statusCode, 404)
 })
 
-import { modelsRoute } from '../dist/web/routes.js'
+test('review latest prefers the running run over the store', async () => {
+  const runner = {
+    runningFor: (cwd) => cwd === '/repo/a' ? { id: 'run-9', status: 'running', startedAt: 1 } : undefined,
+  }
+  const store = { async get() { return { id: 'old', status: 'done' } } }
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const route = reviewLatestRoute(runner, store, workspaces)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/latest?session=s-1' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.id, 'run-9')
+  assert.equal(res.body.status, 'running')
+})
+
+test('review latest returns one shape for running runs and stored records', async () => {
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const runningRes = mockRes()
+  await reviewLatestRoute(
+    { runningFor: () => ({ id: 'run-9', status: 'running', startedAt: 1 }) },
+    { async get() { return null } },
+    workspaces,
+  ).handler({ method: 'GET', url: '/review-panel/api/review/latest?session=s-1' }, runningRes)
+  const record = {
+    id: 'old',
+    status: 'done',
+    model: 'deepseek/deepseek-chat',
+    text: '结论',
+    findings: [],
+    verdict: 'approve',
+    error: null,
+    startedAt: 1,
+    finishedAt: 2,
+    cwd: '/repo/a',
+  }
+  const recordRes = mockRes()
+  await reviewLatestRoute(
+    { runningFor: () => undefined },
+    { async get() { return record } },
+    workspaces,
+  ).handler({ method: 'GET', url: '/review-panel/api/review/latest?session=s-1' }, recordRes)
+  assert.deepEqual(Object.keys(runningRes.body).sort(), Object.keys(recordRes.body).sort())
+  assert.equal(runningRes.body.finishedAt, null)
+  assert.equal(runningRes.body.cwd, '/repo/a')
+  assert.equal(recordRes.body.finishedAt, 2)
+  assert.equal(recordRes.body.cwd, '/repo/a')
+})
+
+test('review latest falls back to the persisted record', async () => {
+  const runner = { runningFor: () => undefined }
+  const store = {
+    async get(cwd) {
+      return cwd === '/repo/a' ? { id: 'old', status: 'done', verdict: 'approve', findings: [] } : null
+    },
+  }
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const route = reviewLatestRoute(runner, store, workspaces)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/latest?session=s-1' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.id, 'old')
+  assert.equal(res.body.verdict, 'approve')
+})
+
+test('review latest is 404 without run or record, 400 for unknown session', async () => {
+  const runner = { runningFor: () => undefined }
+  const store = { async get() { return null } }
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const route = reviewLatestRoute(runner, store, workspaces)
+  const missing = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/latest?session=s-1' }, missing)
+  assert.equal(missing.statusCode, 404)
+  const bad = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/review/latest?session=nope' }, bad)
+  assert.equal(bad.statusCode, 400)
+})
+
+function fakeCommitRunner() {
+  const started = []
+  return {
+    started,
+    start(changeSet, options, selection) {
+      started.push({ changeSet, options, selection })
+      return { id: 'commit-1', status: 'running', startedAt: 1 }
+    },
+    get(id) {
+      if (id !== 'commit-1') return undefined
+      return {
+        id,
+        status: 'done',
+        message: 'fix: 处理空值',
+        commit: 'abc1234',
+        pushed: true,
+        startedAt: 1,
+      }
+    },
+  }
+}
+
+test('commit start collects the workspace diff and returns the run id', async () => {
+  const runner = fakeCommitRunner()
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const route = commitStartRoute(fakeServiceWithFiles(), runner, workspaces)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?session=s-1' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.id, 'commit-1')
+  assert.equal(runner.started[0].changeSet.cwd, '/repo/a')
+  assert.deepEqual(runner.started[0].options, { push: false })
+  assert.equal(runner.started[0].selection, undefined)
+})
+
+test('commit start forwards the push flag and an explicit provider/model pair', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?push=1&provider=openai&model=gpt-5' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(runner.started[0].options, { push: true })
+  assert.deepEqual(runner.started[0].selection, { provider: 'openai', model: 'gpt-5' })
+})
+
+test('commit start still requires provider and model as a pair', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?provider=openai' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /同时指定/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit start rejects when there is nothing to commit', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(fakeService(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /无需提交/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit start requires POST', async () => {
+  const route = commitStartRoute(fakeService(), fakeCommitRunner())
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/commit/start' }, res)
+  assert.equal(res.statusCode, 405)
+})
+
+test('commit status returns the run, 404 for unknown ids', async () => {
+  const route = commitStatusRoute(fakeCommitRunner())
+  const ok = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/commit/status?id=commit-1' }, ok)
+  assert.equal(ok.statusCode, 200)
+  assert.deepEqual(ok.body, {
+    id: 'commit-1',
+    status: 'done',
+    message: 'fix: 处理空值',
+    commit: 'abc1234',
+    pushed: true,
+    pushError: null,
+    error: null,
+    startedAt: 1,
+  })
+  const missing = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/commit/status?id=nope' }, missing)
+  assert.equal(missing.statusCode, 404)
+})
 
 function fakeLlm(listModelsImpl) {
   return () => ({
@@ -160,7 +391,7 @@ function fakeLlm(listModelsImpl) {
 test('models route lists providers, their catalogs, and the default', async () => {
   const route = modelsRoute(fakeLlm(), () => ({ currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) }))
   const res = mockRes()
-  await route.handler({ url: '/review-panel/api/models' }, res)
+  await route.handler({ method: 'GET', url: '/review-panel/api/models' }, res)
   assert.equal(res.statusCode, 200)
   assert.deepEqual(res.body.default, { provider: 'deepseek', model: 'deepseek-chat' })
   assert.equal(res.body.providers.length, 2)
@@ -176,12 +407,34 @@ test('models route lists providers, their catalogs, and the default', async () =
 test('models route is 503 without the llm service, and tolerates no default', async () => {
   const missing = modelsRoute(() => undefined, () => undefined)
   const res = mockRes()
-  await missing.handler({ url: '/review-panel/api/models' }, res)
+  await missing.handler({ method: 'GET', url: '/review-panel/api/models' }, res)
   assert.equal(res.statusCode, 503)
 
   const route = modelsRoute(fakeLlm(), () => undefined)
   const ok = mockRes()
-  await route.handler({ url: '/review-panel/api/models' }, ok)
+  await route.handler({ method: 'GET', url: '/review-panel/api/models' }, ok)
   assert.equal(ok.statusCode, 200)
   assert.equal(ok.body.default, null)
+})
+
+test('GET routes reject non-GET methods with 405', async () => {
+  const changes = changesRoute(fakeService())
+  const changesRes = mockRes()
+  await changes.handler({ method: 'POST', url: '/review-panel/api/changes' }, changesRes)
+  assert.equal(changesRes.statusCode, 405)
+
+  const status = reviewStatusRoute(fakeRunner())
+  const statusRes = mockRes()
+  await status.handler({ method: 'POST', url: '/review-panel/api/review/status?id=run-1' }, statusRes)
+  assert.equal(statusRes.statusCode, 405)
+
+  const latest = reviewLatestRoute({ runningFor: () => undefined }, { async get() { return null } })
+  const latestRes = mockRes()
+  await latest.handler({ method: 'POST', url: '/review-panel/api/review/latest' }, latestRes)
+  assert.equal(latestRes.statusCode, 405)
+
+  const models = modelsRoute(fakeLlm(), () => undefined)
+  const modelsRes = mockRes()
+  await models.handler({ method: 'POST', url: '/review-panel/api/models' }, modelsRes)
+  assert.equal(modelsRes.statusCode, 405)
 })

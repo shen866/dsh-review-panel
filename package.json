@@ -21,9 +21,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist lib && tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "prepare": "npm run build",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "dsh": {

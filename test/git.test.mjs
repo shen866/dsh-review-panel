@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { collectChanges } from '../dist/service/git.js'
+import { collectChanges, commitAll } from '../dist/service/git.js'
 
 function initRepo() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-review-panel-'))
@@ -91,6 +91,87 @@ test('working-tree diffs against the empty tree before the first commit', async 
     const changeSet = await collectChanges({ cwd: dir, scope: 'working-tree' })
     assert.deepEqual(changeSet.files, [{ path: 'a.txt', status: 'added', additions: 1, deletions: 0 }])
     assert.match(changeSet.patch, /\+one/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('since-ref rejects a ref that looks like a git option', async () => {
+  const { dir } = initRepo()
+  try {
+    await assert.rejects(
+      () => collectChanges({ cwd: dir, scope: 'since-ref', ref: '--output=/tmp/x' }),
+      /invalid ref/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('branch rejects a baseBranch containing a range separator', async () => {
+  const { dir } = initRepo()
+  try {
+    await assert.rejects(
+      () => collectChanges({ cwd: dir, scope: 'branch', baseBranch: 'main..other' }),
+      /invalid baseBranch/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('working-tree includes untracked files in both files and patch', async () => {
+  const { dir } = initRepo()
+  try {
+    writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+    mkdirSync(join(dir, 'sub'))
+    writeFileSync(join(dir, 'sub/new.txt'), 'line1\nline2\n')
+    writeFileSync(join(dir, 'bin.dat'), Buffer.from([0, 1, 2, 3]))
+    const changeSet = await collectChanges({ cwd: dir, scope: 'working-tree' })
+    assert.deepEqual(changeSet.files, [
+      { path: 'a.txt', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'bin.dat', status: 'added', additions: 0, deletions: 0 },
+      { path: 'sub/new.txt', status: 'added', additions: 2, deletions: 0 },
+    ])
+    // The synthesized section header must stay parseable by the frontend
+    // `a/(.*) b/(.*)` regex, including for binary files.
+    assert.match(changeSet.patch, /diff --git a\/sub\/new\.txt b\/sub\/new\.txt/)
+    assert.match(changeSet.patch, /\+line1/)
+    assert.match(changeSet.patch, /Binary files \/dev\/null and b\/bin\.dat differ/)
+    assert.equal(changeSet.truncated, false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('patch truncation never splits a multibyte character', async () => {
+  const { dir } = initRepo()
+  try {
+    writeFileSync(join(dir, 'a.txt'), '中'.repeat(2000))
+    const changeSet = await collectChanges({ cwd: dir, scope: 'working-tree', maxPatchBytes: 1000 })
+    assert.equal(changeSet.truncated, true)
+    assert.ok(Buffer.byteLength(changeSet.patch, 'utf8') <= 1000)
+    // fatal decoding throws on any lone surrogate or truncated sequence.
+    assert.doesNotThrow(() =>
+      new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(changeSet.patch, 'utf8')),
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('commitAll stages tracked and untracked changes and returns the short hash', async () => {
+  const { dir, git } = initRepo()
+  try {
+    writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+    writeFileSync(join(dir, 'b.txt'), 'new\n')
+    const hash = await commitAll(dir, 'feat: 提交信息\n\n- 要点')
+    assert.match(hash, /^[0-9a-f]{7,}$/)
+    assert.equal(git('rev-parse', 'HEAD').trim().startsWith(hash), true)
+    assert.equal(git('log', '-1', '--pretty=%B').trim(), 'feat: 提交信息\n\n- 要点'.trim())
+    // Everything committed: the working tree is clean again.
+    const after = await collectChanges({ cwd: dir, scope: 'working-tree' })
+    assert.deepEqual(after.files, [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

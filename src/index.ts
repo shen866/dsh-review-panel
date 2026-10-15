@@ -6,3 +6,7 @@ export { default, collectChanges, DEFAULT_MAX_PATCH_BYTES, REVIEW_SCOPES } from 
 export type { CollectOptions } from './service/index.js'
 export { Config } from './config.js'
 export * from './service/types.js'
+export { parseReviewFindings, REVIEW_SEVERITIES, REVIEW_VERDICTS } from './review/findings.js'
+export type { ParsedReview, ReviewFinding, ReviewSeverity, ReviewVerdict } from './review/findings.js'
+export { ReviewStore } from './review/store.js'
+export type { ReviewRecord, ReviewStoreLike } from './review/store.js'
