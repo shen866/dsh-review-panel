@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
-import type { ChangeSet, FileChange, FileStatus, ReviewScope } from './types.js'
+import type { ChangeSet, FileChange, FileStatus, RepoOperation, RepoStatus, ReviewScope } from './types.js'
 
 export const DEFAULT_MAX_PATCH_BYTES = 512 * 1024
 
@@ -150,6 +151,127 @@ const STATUS_LETTERS: Record<string, FileStatus> = {
   R: 'renamed',
 }
 
+/** RepoStatus for a directory that is not a usable git work tree. */
+function notARepo(): RepoStatus {
+  return {
+    isRepo: false,
+    branch: null,
+    head: null,
+    detached: false,
+    unborn: false,
+    operation: null,
+    conflicts: [],
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    stashes: 0,
+  }
+}
+
+/**
+ * Parse the branch header and unmerged entries of
+ * `git status --porcelain=v2 --branch -z --untracked-files=no`
+ * (records are NUL-separated; `-z` keeps paths raw, never quoted).
+ */
+export function parseStatusBranch(raw: string): Pick<
+  RepoStatus,
+  'branch' | 'head' | 'detached' | 'unborn' | 'upstream' | 'ahead' | 'behind' | 'conflicts'
+> {
+  let branch: string | null = null
+  let head: string | null = null
+  let detached = false
+  let unborn = false
+  let upstream: string | null = null
+  let ahead = 0
+  let behind = 0
+  const conflicts: string[] = []
+  for (const record of raw.split('\0')) {
+    if (record.startsWith('# branch.oid ')) {
+      const value = record.slice('# branch.oid '.length)
+      // `(initial)` marks an unborn HEAD; anything else is the commit hash.
+      if (value === '(initial)') unborn = true
+      else head = value
+    } else if (record.startsWith('# branch.head ')) {
+      const value = record.slice('# branch.head '.length)
+      if (value === '(detached)') detached = true
+      else branch = value
+    } else if (record.startsWith('# branch.upstream ')) {
+      upstream = record.slice('# branch.upstream '.length)
+    } else if (record.startsWith('# branch.ab ')) {
+      const match = /\+(\d+) -(\d+)/.exec(record)
+      if (match) {
+        ahead = Number(match[1]) || 0
+        behind = Number(match[2]) || 0
+      }
+    } else if (record.startsWith('u ')) {
+      // Unmerged record: `u XY sub m1 m2 m3 mW h1 h2 h3 <path>`; the path is
+      // everything after the tenth space (it may contain spaces; `-z` keeps
+      // it raw). A rename appends the source path as its own NUL record,
+      // which simply matches no prefix here and is skipped.
+      const path = record.split(' ').slice(10).join(' ')
+      if (path) conflicts.push(path)
+    }
+  }
+  return { branch, head, detached, unborn, upstream, ahead, behind, conflicts }
+}
+
+/** True when a `git rev-parse -q --verify <name>` succeeded (name exists). */
+function refExists(result: GitOutput): boolean {
+  return result.stdout.trim().length > 0
+}
+
+/** Detect an unfinished merge/rebase/cherry-pick/revert from repo metadata. */
+async function detectOperation(cwd: string, signal?: AbortSignal): Promise<RepoOperation | null> {
+  const probe = (name: string) =>
+    runGit(['rev-parse', '-q', '--verify', name], cwd, { signal, allowExitCodes: [1] })
+  const [merge, cherryPick, revert, rebaseMerge, rebaseApply] = await Promise.all([
+    probe('MERGE_HEAD'),
+    probe('CHERRY_PICK_HEAD'),
+    probe('REVERT_HEAD'),
+    runGit(['rev-parse', '--git-path', 'rebase-merge'], cwd, { signal }),
+    runGit(['rev-parse', '--git-path', 'rebase-apply'], cwd, { signal }),
+  ])
+  // An unfinished rebase is checked first: it also stages conflicts, so a
+  // bare MERGE_HEAD probe would mislabel it as a merge on some git versions.
+  if (existsSync(resolve(cwd, rebaseMerge.stdout.trim())) || existsSync(resolve(cwd, rebaseApply.stdout.trim()))) {
+    return 'rebase'
+  }
+  if (refExists(cherryPick)) return 'cherry-pick'
+  if (refExists(revert)) return 'revert'
+  if (refExists(merge)) return 'merge'
+  return null
+}
+
+/**
+ * Inspect where the git repository at `cwd` stands in its lifecycle. Never
+ * throws for "not a repository" — that is a first-class state the panel
+ * renders — but propagates unexpected git failures.
+ */
+export async function collectRepoStatus(cwd: string, signal?: AbortSignal): Promise<RepoStatus> {
+  const inside = await runGit(['rev-parse', '--is-inside-work-tree'], cwd, { signal }).then(
+    (result) => result.stdout.trim() === 'true',
+    (error) => {
+      // Missing cwd or missing git binary both surface as ENOENT from spawn.
+      if (error instanceof Error && ((error as NodeJS.ErrnoException).code === 'ENOENT' || /not a git repository/i.test(error.message))) {
+        return false
+      }
+      throw error
+    },
+  )
+  if (!inside) return notARepo()
+  const [status, stash, operation] = await Promise.all([
+    runGit(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=no'], cwd, { signal }),
+    runGit(['stash', 'list'], cwd, { signal }),
+    detectOperation(cwd, signal),
+  ])
+  return {
+    isRepo: true,
+    operation,
+    stashes: stash.stdout.trim() ? stash.stdout.trim().split('\n').length : 0,
+    ...parseStatusBranch(status.stdout),
+  }
+}
+
 /**
  * Parse `git diff --name-status -z`. Tokens are NUL-separated; a status record
  * is the status letter (with optional score), followed by one path, or two
@@ -273,6 +395,21 @@ async function collectUntracked(
 export async function collectChanges(options: CollectOptions): Promise<ChangeSet> {
   if (options.ref) assertSafeRef(options.ref, 'ref')
   if (options.baseBranch) assertSafeRef(options.baseBranch, 'baseBranch')
+  // Lifecycle state first: a non-repository is a first-class result, not an
+  // error, and a merge/rebase in progress is context the panel must surface.
+  const repo = await collectRepoStatus(options.cwd, options.signal)
+  if (!repo.isRepo) {
+    return {
+      scope: options.scope,
+      cwd: options.cwd,
+      ref: options.ref ?? null,
+      baseBranch: options.baseBranch ?? null,
+      files: [],
+      patch: '',
+      truncated: false,
+      repo,
+    }
+  }
   const range = await resolveRange(options)
   const maxPatchBytes = options.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES
   const [nameStatus, numstat, patchResult] = await Promise.all([
@@ -304,6 +441,7 @@ export async function collectChanges(options: CollectOptions): Promise<ChangeSet
     files,
     patch,
     truncated,
+    repo,
   }
 }
 

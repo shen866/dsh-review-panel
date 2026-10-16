@@ -60,6 +60,22 @@ dsh-plugins/  (= dsh-code-review 包根)
 - `since-ref` — 指定 git 记录之后到 HEAD 的变更（`git diff <ref>..HEAD`，需提供 `ref`）
 - `branch` — 分支全量检视（`git diff <base>...HEAD`，base 缺省用 review-panel 的 `defaultBaseBranch` 配置）
 
+## 仓库生命周期状态（RepoStatus）
+
+`collect` 返回的 `ChangeSet` 携带 `repo` 字段，描述仓库在 git 全流程中所处的位置，面板据此在头部显示状态徽标并调整行为：
+
+| 状态 | 来源 | 面板表现 |
+| --- | --- | --- |
+| 非 git 目录 | `git rev-parse --is-inside-work-tree` | 空态提示「当前目录不是 git 仓库」；检视/提交路由返回 400 |
+| 尚无提交（unborn HEAD） | `status --porcelain=v2` 的 `(initial)` | 徽标「尚无提交」，diff 对空树计算 |
+| 游离 HEAD | `branch.head (detached)` | 徽标「游离 HEAD」 |
+| merge/rebase/cherry-pick/revert 进行中 | `MERGE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`/`rebase-merge`/`rebase-apply`（rebase 优先判定，避免误判为 merge） | 徽标「`<op>` 中」+ 冲突文件数 |
+| 未解决冲突 | `status --porcelain=v2` 的 `u` 记录 | 徽标「N 个文件冲突」；提交按钮禁用、提交路由 400（防止把冲突标记自动 `add -A` 进提交） |
+| 领先/落后 upstream | `branch.ab` ahead/behind | 徽标「领先 origin/main N 个提交」；工作区干净但有未推送提交时，空态文案相应变化 |
+| stash | `git stash list` | 徽标「N 个 stash」 |
+
+轮询快照比对包含 `repo` 字段，状态变化（如解决冲突、完成 merge）会立即触发重渲染。
+
 ## 配置
 
 `review-panel` 服务（`src/config.ts`）：
@@ -75,7 +91,7 @@ dsh-plugins/  (= dsh-code-review 包根)
 - **服务形态**：对外提供能力必须用类形态——`ReviewPanelService extends Service`，`super(ctx, 'reviewPanel')`，并通过声明合并把类型挂到 `Context` 上。
 - **UI 架构**：面板 UI 以客户端模块（`dsh.client` 声明 + `lib/client.js`，由 `src/client/` 经 tsdown 打包）注册为 DSH 原生右侧栏的 tab 类型；后端通过 `webServer` 路由提供 JSON API；`webServer` 仅 web profile 存在，故用 `ctx.inject(['webServer'], cb)` 可选加载。
 - **仓库定位**：面板不接收仓库路径输入——槽位是 session 作用域，框架给面板组件注入 `sessionId`，前端以 `?session=` 传给 API，服务端经 `workspaceRegistry` 把 session 解析为其工作区的仓库路径（按请求惰性解析，规避启动时序）；无 session 时回退 `process.cwd()`。
-- **自动同步**：面板每 4 秒轮询 API，按 diff 内容快照比对，只在变更真正变化时重渲染；页面隐藏时暂停轮询。
+- **自动同步**：面板每 4 秒轮询 API，按 diff 内容 + `repo` 生命周期状态快照比对，只在真正变化时重渲染；页面隐藏时暂停轮询。
 - **独立智能体**：评审不占用当前会话——`ReviewRunner` 创建一个一次性 root agent 作 parent，再 spawn 子智能体执行评审（模型经 spawn 请求的 `agentOptions` 显式指定，覆盖默认的父代继承）；`agents` / `subagents` / `agentDefaultModel` 均按请求惰性解析。
 - **检视记录持久化**：cordis 没有 `storageDomain` 服务，故持久化用文件实现——`ReviewStore` 把每仓库最新一次检视记录写入 `<storageDir>/reviews.json`（单文件表，键为仓库 realpath，临时文件 + rename 原子替换）；写盘失败只静默降级，绝不影响检视本身。runner 落定时写入，面板挂载时经 `/review/latest` 恢复。
 - **意见锚定**：`ReviewFinding` 用 `path` + `quote`（逐字 diff 行内容，先精确后 trim 宽松匹配）+ `side`（new→add/ctx，old→del）+ 可选 `line`（重复 quote 时按行号距离消歧）定位到结构化 diff 行；`src/shared/diff.ts` 的 `parseFileDiff` 解析 `@@ -a,b +c,d @@` 头维护新旧行号，锚定逻辑与客户端/单测共用。

@@ -197,6 +197,10 @@ export function reviewStartRoute(
           return
         }
         const changeSet = await reviewPanel.collect({ cwd: repo.cwd, scope: 'working-tree' })
+        if (changeSet.repo && changeSet.repo.isRepo === false) {
+          sendJson(res, 400, { error: '当前目录不是 git 仓库，无法检视' })
+          return
+        }
         if (changeSet.files.length === 0) {
           sendJson(res, 400, { error: '工作区没有未提交的变更，无需检视' })
           return
@@ -356,6 +360,14 @@ export function commitStartRoute(
           return
         }
         const changeSet = await reviewPanel.collect({ cwd: repo.cwd, scope: 'working-tree' })
+        if (changeSet.repo && changeSet.repo.isRepo === false) {
+          sendJson(res, 400, { error: '当前目录不是 git 仓库，无法提交' })
+          return
+        }
+        if (changeSet.repo && changeSet.repo.conflicts.length > 0) {
+          sendJson(res, 400, { error: `存在 ${changeSet.repo.conflicts.length} 个未解决冲突的文件，请先解决冲突再提交` })
+          return
+        }
         if (changeSet.files.length === 0) {
           sendJson(res, 400, { error: '工作区没有未提交的变更，无需提交' })
           return

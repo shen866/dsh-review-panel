@@ -186,7 +186,10 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     fetch('/review-panel/api/changes?' + params.toString())
       .then(readJson)
       .then((body) => {
-        const snapshot = JSON.stringify([body.files, body.patch, body.truncated, body.cwd])
+        // repo status rides along: a finished merge, a new upstream ahead
+        // count or a resolved conflict must re-render even when the diff
+        // itself is unchanged, so it joins the snapshot comparison.
+        const snapshot = JSON.stringify([body.files, body.patch, body.truncated, body.cwd, body.repo])
         if (snapshotRef.current !== snapshot) {
           snapshotRef.current = snapshot
           setData(body)
@@ -424,6 +427,22 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
         </select>
       )
     }
+    const repo = data.repo
+    const badges: string[] = []
+    if (repo) {
+      if (repo.operation) {
+        badges.push(
+          repo.conflicts.length > 0
+            ? `${repo.operation} 中 · ${repo.conflicts.length} 个文件冲突`
+            : `${repo.operation} 中`,
+        )
+      }
+      if (repo.unborn) badges.push('尚无提交')
+      else if (repo.detached) badges.push('游离 HEAD')
+      if (repo.ahead > 0) badges.push(`领先 ${repo.upstream} ${repo.ahead} 个提交`)
+      if (repo.behind > 0) badges.push(`落后 ${repo.behind} 个提交`)
+      if (repo.stashes > 0) badges.push(`${repo.stashes} 个 stash`)
+    }
     header = (
       <div style={styles.header}>
         <div style={styles.headerRow}>
@@ -441,11 +460,22 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
         </div>
         <div style={styles.headerMeta}>
           {data.files.length + ' 个文件变更 · 自动同步' + (data.truncated ? ' · diff 已截断' : '')}
+          {badges.length > 0 ? ' · ' + badges.join(' · ') : ''}
         </div>
       </div>
     )
-    if (data.files.length === 0) {
-      content = <div style={styles.empty}>工作区干净，没有未提交的变更</div>
+    if (repo && repo.isRepo === false) {
+      content = <div style={styles.empty}>当前目录不是 git 仓库</div>
+    } else if (data.files.length === 0) {
+      content = (
+        <div style={styles.empty}>
+          {repo && repo.ahead > 0
+            ? `工作区干净，但有 ${repo.ahead} 个提交尚未推送`
+            : repo && repo.operation
+              ? '当前操作没有产生工作区变更'
+              : '工作区干净，没有未提交的变更'}
+        </div>
+      )
     } else {
       content = (
         <div style={styles.list}>
@@ -569,9 +599,12 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   }
 
   // Bottom bar of the changes page: commit the working tree with an
-  // auto-generated message, optionally pushing afterwards.
+  // auto-generated message, optionally pushing afterwards. Unresolved
+  // merge conflicts block committing (the server rejects it too) — the
+  // auto-stage would happily record conflict markers as content.
   let commitBar: any = null
   if (data && data.files.length > 0) {
+    const conflicts = data.repo ? data.repo.conflicts.length : 0
     let note: any = null
     if (commit) {
       if (commit.status === 'running') {
@@ -595,16 +628,16 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
         </span>
         <button
           style={styles.reviewButton}
-          disabled={!!commitRunning}
-          title="自动生成 commit 信息并提交全部变更"
+          disabled={!!commitRunning || conflicts > 0}
+          title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '自动生成 commit 信息并提交全部变更'}
           onClick={() => { startCommit(false) }}
         >
           {commitRunning && commit && commit.pushed === false ? '提交中…' : '提交'}
         </button>
         <button
           style={styles.reviewButton}
-          disabled={!!commitRunning}
-          title="自动生成 commit 信息，提交并推送到远端"
+          disabled={!!commitRunning || conflicts > 0}
+          title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '自动生成 commit 信息，提交并推送到远端'}
           onClick={() => { startCommit(true) }}
         >
           {commitRunning && commit && commit.pushed ? '提交并推送中…' : '提交并推送'}

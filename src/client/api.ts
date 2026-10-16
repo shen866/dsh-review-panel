@@ -6,7 +6,7 @@ import type { ReviewFinding } from '../review/findings.js'
 import type { ChangeSet } from '../service/types.js'
 
 /** Response of `/review-panel/api/changes` (a serialized `ChangeSet`). */
-export type ChangesBody = Pick<ChangeSet, 'files' | 'patch' | 'truncated' | 'cwd'>
+export type ChangesBody = Pick<ChangeSet, 'files' | 'patch' | 'truncated' | 'cwd' | 'repo'>
 
 /** Response of `/review-panel/api/models`. */
 export type ModelsBody = {

@@ -438,3 +438,88 @@ test('GET routes reject non-GET methods with 405', async () => {
   await models.handler({ method: 'POST', url: '/review-panel/api/models' }, modelsRes)
   assert.equal(modelsRes.statusCode, 405)
 })
+
+function repoOf(changeSet, extra = {}) {
+  return {
+    isRepo: true,
+    branch: 'main',
+    head: 'abc1234',
+    detached: false,
+    unborn: false,
+    operation: null,
+    conflicts: [],
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    stashes: 0,
+    ...extra,
+  }
+}
+
+function fakeServiceWithRepo(files, repoExtra) {
+  return {
+    async collect(options) {
+      const repo = repoOf(null, repoExtra)
+      return {
+        cwd: options.cwd,
+        scope: options.scope,
+        files,
+        patch: 'x',
+        truncated: false,
+        repo,
+      }
+    },
+  }
+}
+
+test('review start rejects a non-git directory', async () => {
+  const runner = fakeRunner()
+  const route = reviewStartRoute(fakeServiceWithRepo([], { isRepo: false }), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/review/start' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /不是 git 仓库/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit start rejects a directory with unresolved conflicts', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(
+    fakeServiceWithRepo([{ path: 'a.txt', status: 'modified', additions: 4, deletions: 0 }], {
+      operation: 'merge',
+      conflicts: ['a.txt'],
+    }),
+    runner,
+  )
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /冲突/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit start still works while a merge finishes without conflicts', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(
+    fakeServiceWithRepo([{ path: 'a.txt', status: 'modified', additions: 1, deletions: 0 }], {
+      operation: 'merge',
+      conflicts: [],
+    }),
+    runner,
+  )
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(runner.started.length, 1)
+})
+
+test('changes route passes the repo status through', async () => {
+  const service = fakeServiceWithRepo([], { ahead: 2, upstream: 'origin/main', operation: 'rebase', conflicts: ['a.txt'] })
+  const route = changesRoute(service)
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/changes' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.repo.ahead, 2)
+  assert.equal(res.body.repo.operation, 'rebase')
+  assert.deepEqual(res.body.repo.conflicts, ['a.txt'])
+})
