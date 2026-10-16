@@ -4,6 +4,7 @@ import test from 'node:test'
 
 import {
   changesRoute,
+  commitMessageRoute,
   commitStartRoute,
   commitStatusRoute,
   modelsRoute,
@@ -373,6 +374,55 @@ test('commit start requires POST', async () => {
   const route = commitStartRoute(fakeService(), fakeCommitRunner())
   const res = mockRes()
   await route.handler({ method: 'GET', url: '/review-panel/api/commit/start' }, res)
+  assert.equal(res.statusCode, 405)
+})
+
+test('commit message starts a message-only run and returns the run id', async () => {
+  const runner = fakeCommitRunner()
+  const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
+  const route = commitMessageRoute(fakeServiceWithFiles(), runner, workspaces)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/message?session=s-1' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.id, 'commit-1')
+  assert.equal(runner.started[0].changeSet.cwd, '/repo/a')
+  assert.deepEqual(runner.started[0].options, { push: false, messageOnly: true })
+  assert.equal(runner.started[0].selection, undefined)
+})
+
+test('commit message forwards an explicit provider/model pair', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitMessageRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/message?provider=openai&model=gpt-5' }, res)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(runner.started[0].selection, { provider: 'openai', model: 'gpt-5' })
+})
+
+test('commit message still requires provider and model as a pair', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitMessageRoute(fakeServiceWithFiles(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/message?provider=openai' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /同时指定/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit message rejects when there is nothing to generate from', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitMessageRoute(fakeService(), runner)
+  const res = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/message' }, res)
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.error, /无需生成/)
+  assert.equal(runner.started.length, 0)
+})
+
+test('commit message requires POST', async () => {
+  const route = commitMessageRoute(fakeService(), fakeCommitRunner())
+  const res = mockRes()
+  await route.handler({ method: 'GET', url: '/review-panel/api/commit/message' }, res)
   assert.equal(res.statusCode, 405)
 })
 

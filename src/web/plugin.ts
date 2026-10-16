@@ -4,6 +4,7 @@ import { CommitRunner } from '../review/commit.js'
 import { ReviewRunner } from '../review/runner.js'
 import {
   changesRoute,
+  commitMessageRoute,
   commitStartRoute,
   commitStatusRoute,
   modelsRoute,
@@ -16,7 +17,7 @@ import {
   type WorkspaceRegistryLike,
 } from './routes.js'
 
-export const name = 'dsh-code-review-web'
+export const name = 'dsh-review-panel-web'
 
 export const inject = ['reviewPanel']
 
@@ -62,6 +63,7 @@ export function apply(ctx: Context) {
     wctx.effect(() => webServer.register(reviewStatusRoute(runner)))
     wctx.effect(() => webServer.register(reviewLatestRoute(runner, ctx.reviewPanel.reviewStore, workspaces)))
     wctx.effect(() => webServer.register(commitStartRoute(ctx.reviewPanel, commitRunner, workspaces)))
+    wctx.effect(() => webServer.register(commitMessageRoute(ctx.reviewPanel, commitRunner, workspaces)))
     wctx.effect(() => webServer.register(commitStatusRoute(commitRunner)))
   })
 }

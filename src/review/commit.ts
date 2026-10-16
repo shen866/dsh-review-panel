@@ -2,9 +2,11 @@
  * One-shot "generate a commit message, then commit (and optionally push)"
  * runs. The message normally comes from an independent subagent reading the
  * working tree diff (same spawn pattern as ReviewRunner); a caller-supplied
- * message skips the generation. The git operations run server-side
- * afterwards. At most one running commit per repo. The git calls are
- * injectable so tests never touch a real repository.
+ * message skips the generation. A run can also stop after the generation
+ * step (messageOnly) so the panel can draft a message before committing.
+ * The git operations run server-side afterwards. At most one running commit
+ * per repo. The git calls are injectable so tests never touch a real
+ * repository.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -108,19 +110,21 @@ export class CommitRunner {
    * Starts a commit run, or returns the already-running one for the same repo.
    * A non-empty `options.message` is used verbatim and skips the message
    * generation subagent entirely; an empty/absent one triggers generation.
+   * `options.messageOnly` stops the run right after generation: the message is
+   * exposed on the run (and via the status route) and no git operation runs.
    */
   start(
     changeSet: ChangeSet,
-    options: { push: boolean; message?: string },
+    options: { push: boolean; message?: string; messageOnly?: boolean },
     selection?: ReviewModelSelection,
   ): CommitRun {
     const existingId = this.runningByRepo.get(changeSet.cwd)
     const existing = existingId ? this.runs.get(existingId) : undefined
     if (existing && existing.status === 'running') return existing
 
-    const message = options.message && options.message.trim() ? options.message.trim() : undefined
+    const message = !options.messageOnly && options.message && options.message.trim() ? options.message.trim() : undefined
     const run: CommitRun = { id: randomUUID(), status: 'running', startedAt: Date.now(), settled: Promise.resolve() }
-    run.settled = this.execute(run, changeSet, options.push, message, selection)
+    run.settled = this.execute(run, changeSet, options.push, message, selection, options.messageOnly ?? false)
     this.runs.set(run.id, run)
     this.runningByRepo.set(changeSet.cwd, run.id)
     return run
@@ -139,6 +143,7 @@ export class CommitRunner {
     pushRequested: boolean,
     givenMessage: string | undefined,
     requested?: ReviewModelSelection,
+    messageOnly = false,
   ): Promise<void> {
     const fail = (error: unknown) => {
       run.status = 'error'
@@ -187,6 +192,12 @@ export class CommitRunner {
         message = extractCommitMessage(raw) || fallbackMessage(changeSet)
       }
       run.message = message
+      if (messageOnly) {
+        // Generation-only run: hand the message to the caller, touch nothing.
+        run.pushed = false
+        run.status = 'done'
+        return
+      }
       const commit = this.deps.commit ?? commitAll
       const push = this.deps.push ?? pushCurrentBranch
       run.commit = await Promise.race([commit(changeSet.cwd, message, controller.signal), timeout])

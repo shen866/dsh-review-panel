@@ -24,6 +24,6 @@ export const Config: Schema<Config> = Schema.object({
     .default(512 * 1024)
     .description('Maximum patch size in bytes. Longer patches are truncated and flagged.'),
   storageDir: Schema.string()
-    .default('~/.dsh-code-review')
+    .default('~/.dsh-review-panel')
     .description('Directory where the latest review record per repo is persisted.'),
 })

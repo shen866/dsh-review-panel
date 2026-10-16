@@ -20,8 +20,8 @@ import type { ChangesBody, CommitState, FindingMark, ModelsBody, ReviewState } f
 import { basename, COLORS, FileEntry, FindingCard, styles, SEVERITY_STATS_ORDER, VERDICT_BADGES } from './diff-view.js'
 
 const POLL_MS = 4000
-const MODEL_KEY = 'dsh-code-review:model'
-const MARKS_KEY = 'dsh-code-review:marks:'
+const MODEL_KEY = 'dsh-review-panel:model'
+const MARKS_KEY = 'dsh-review-panel:marks:'
 const MAX_REVIEW_POLL_FAILURES = 5
 
 /**
@@ -51,7 +51,7 @@ function ensureModelPickerCss() {
   if (modelPickerCssInjected || typeof document === 'undefined') return
   modelPickerCssInjected = true
   const tag = document.createElement('style')
-  tag.dataset.pluginCss = 'dsh-code-review/model-picker'
+  tag.dataset.pluginCss = 'dsh-review-panel/model-picker'
   tag.textContent = `
 .dsh-crp-modelRoot{position:relative;min-width:0;flex-shrink:1}
 .dsh-crp-modelTrigger{display:flex;align-items:center;gap:4px;height:24px;max-width:200px;padding:0 4px 0 8px;border:none;border-radius:6px;background:transparent;color:inherit;font-size:12px;line-height:20px;cursor:pointer;min-width:0}
@@ -326,11 +326,13 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   // Finding index the jump buttons last landed on (drives the highlight).
   const [activeFinding, setActiveFinding] = useState<number | null>(null)
   const [commit, setCommit] = useState<CommitState | null>(null)
-  // Commit dialog: open state, the message draft (empty = auto-generate), and
-  // whether the running commit skipped generation by using the draft.
+  // Commit dialog: open state, the message draft, the mode of the run in
+  // flight ('message' = generation only, 'commit' = the git operations), and
+  // the "no message yet" hint shown when 提交/提交并推送 is clicked too early.
   const [commitOpen, setCommitOpen] = useState(false)
   const [commitMsg, setCommitMsg] = useState('')
-  const [commitGiven, setCommitGiven] = useState(false)
+  const [commitMode, setCommitMode] = useState<'message' | 'commit' | null>(null)
+  const [commitWarn, setCommitWarn] = useState<string | null>(null)
   // Indices that anchored at least once; losing the anchor afterwards
   // means the reviewed code was edited, which auto-marks "已修改".
   const everAnchoredRef = useRef<Set<number>>(new Set())
@@ -504,25 +506,48 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     return () => { clearInterval(timer) }
   }, [sync])
 
+  // Step two of the dialog: commit (and optionally push) with the draft. The
+  // draft must exist — generation is step one's button, so an empty draft
+  // only shows a hint instead of starting a run.
   const startCommit = useCallback((push: boolean) => {
     if (commit && commit.status === 'running') return
+    const message = commitMsg.trim()
+    if (!message) {
+      setCommitWarn('请先生成或填写 commit 信息')
+      return
+    }
+    setCommitWarn(null)
     const params = new URLSearchParams()
     if (sessionId) params.set('session', sessionId)
     if (push) params.set('push', '1')
-    const message = commitMsg.trim()
-    setCommitGiven(!!message)
-    if (message) params.set('message', commitMsg)
-    if (!message && effectiveChoice) {
-      const slash = effectiveChoice.indexOf('/')
-      params.set('provider', effectiveChoice.slice(0, slash))
-      params.set('model', effectiveChoice.slice(slash + 1))
-    }
+    params.set('message', commitMsg)
+    setCommitMode('commit')
     setCommit({ status: 'running', pushed: push })
     fetch('/review-panel/api/commit/start?' + params.toString(), { method: 'POST' })
       .then(readJson)
       .then((body) => { setCommit({ id: body.id, status: 'running', pushed: push }) },
         (err) => { setCommit({ status: 'error', error: String(err && err.message || err) }) })
-  }, [sessionId, commit, commitMsg, effectiveChoice])
+  }, [sessionId, commit, commitMsg])
+
+  // Step one of the dialog: generate the commit message only. The run never
+  // touches git; when it settles the message lands in the draft textarea.
+  const startCommitMsg = useCallback(() => {
+    if (commit && commit.status === 'running') return
+    setCommitWarn(null)
+    const params = new URLSearchParams()
+    if (sessionId) params.set('session', sessionId)
+    if (effectiveChoice) {
+      const slash = effectiveChoice.indexOf('/')
+      params.set('provider', effectiveChoice.slice(0, slash))
+      params.set('model', effectiveChoice.slice(slash + 1))
+    }
+    setCommitMode('message')
+    setCommit({ status: 'running' })
+    fetch('/review-panel/api/commit/message?' + params.toString(), { method: 'POST' })
+      .then(readJson)
+      .then((body) => { setCommit({ id: body.id, status: 'running' }) },
+        (err) => { setCommit({ status: 'error', error: String(err && err.message || err) }) })
+  }, [sessionId, commit, effectiveChoice])
 
   // Close the dialog on Escape unless a commit is in flight.
   useEffect(() => {
@@ -559,6 +584,13 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
             setCommitMsg((prev) => prev || body.message)
           }
           if (body.status && body.status !== 'running') {
+            if (body.status === 'done' && commitMode === 'message') {
+              // Generation finished: the draft (filled above or here) is the
+              // result; drop the run so the buttons come back.
+              if (body.message) setCommitMsg((prev) => prev || body.message)
+              setCommit(null)
+              return
+            }
             if (body.status === 'done') {
               // The changes just landed: drop the review (findings can no
               // longer anchor to an empty diff) along with its marks so a
@@ -586,7 +618,8 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   }, [commitRunning, commitId, sync])
 
   // A finished commit closes the dialog shortly after showing its result; a
-  // failed one stays open so the error is visible (and the run retryable).
+  // finished generation run never reaches this (it clears itself in the
+  // poller). A failed run stays open so the error is visible (and retryable).
   const commitDone = !!(commit && commit.status === 'done')
   useEffect(() => {
     if (!commitDone) return
@@ -594,6 +627,7 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
       setCommitOpen(false)
       setCommitMsg('')
       setCommit(null)
+      setCommitMode(null)
     }, 1500)
     return () => { clearTimeout(timer) }
   }, [commitDone])
@@ -921,7 +955,7 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
           style={styles.reviewButton}
           disabled={!!commitRunning || conflicts > 0}
           title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '提交全部变更'}
-          onClick={() => { setCommitOpen(true) }}
+          onClick={() => { setCommitWarn(null); setCommitOpen(true) }}
         >
           提交
         </button>
@@ -936,15 +970,19 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
         deletions += file.deletions
       }
       let statusLine: any = null
-      if (commit) {
+      if (commitWarn && !commitRunning) {
+        statusLine = <span style={styles.modalError}>{commitWarn}</span>
+      } else if (commit) {
         if (commit.status === 'running') {
-          // Two visible phases: the model generates into the input first,
-          // then the git operations run with that text.
-          statusLine = !commitGiven && !commit.message
+          // Generation runs surface '正在生成'; commit runs with a message
+          // in hand go straight to the git phase.
+          statusLine = commitMode === 'message' || !commit.message
             ? '正在生成 commit 信息…'
             : (commit.pushed ? '正在提交并推送…' : '正在提交…')
         } else if (commit.status === 'error') {
-          statusLine = <span style={styles.modalError}>{'提交失败：' + (commit.error || '未知错误')}</span>
+          statusLine = <span style={styles.modalError}>
+            {(commitMode === 'message' ? '生成失败：' : '提交失败：') + (commit.error || '未知错误')}
+          </span>
         } else {
           statusLine = '已提交 ' + (commit.commit || '') +
             (commit.pushed ? ' 并推送' : '') +
@@ -969,12 +1007,20 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
                 style={styles.modalInput}
                 value={commitMsg}
                 disabled={!!commitRunning}
-                placeholder="commit 信息（留空自动生成）"
+                placeholder="commit 信息（点击「生成 commit 信息」或手动输入）"
                 onChange={(event: any) => { setCommitMsg(event.target.value) }}
               />
               {statusLine ? <div style={styles.modalStatus}>{statusLine}</div> : null}
             </div>
             <div style={styles.modalFooter}>
+              <button
+                style={styles.reviewButton}
+                disabled={!!commitRunning}
+                title="根据当前变更自动生成 commit 信息"
+                onClick={startCommitMsg}
+              >
+                {commitMode === 'message' && commitRunning ? '生成中…' : '生成 commit 信息'}
+              </button>
               <button
                 style={styles.reviewButton}
                 disabled={!!commitRunning}

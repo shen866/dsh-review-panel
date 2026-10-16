@@ -1,5 +1,5 @@
 {
-  "name": "dsh-code-review",
+  "name": "dsh-review-panel",
   "version": "0.1.0",
   "description": "DeepSeek Harness plugin: collects code changes, shows them in a right-sidebar panel, and reviews them with an independent subagent.",
   "type": "module",

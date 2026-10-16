@@ -84,7 +84,7 @@ test('the service class carries the cordis Config schema', () => {
   const resolved = ReviewPanelService.Config({})
   assert.equal(resolved.defaultBaseBranch, 'main')
   assert.equal(resolved.maxPatchBytes, 512 * 1024)
-  assert.equal(resolved.storageDir, '~/.dsh-code-review')
+  assert.equal(resolved.storageDir, '~/.dsh-review-panel')
 })
 
 test('a missing storageDir falls back to the schema default', () => {

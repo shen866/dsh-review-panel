@@ -287,9 +287,9 @@ export function basename(path: string): string {
 }
 
 // :hover needs real CSS (inline styles can't express it); inject once.
-if (typeof document !== 'undefined' && !document.getElementById('dsh-code-review-styles')) {
+if (typeof document !== 'undefined' && !document.getElementById('dsh-review-panel-styles')) {
   const styleEl = document.createElement('style')
-  styleEl.id = 'dsh-code-review-styles'
+  styleEl.id = 'dsh-review-panel-styles'
   styleEl.textContent = '.' + FILE_HEAD_CLASS + ':hover{background:' + COLORS.hover + '}'
   document.head.appendChild(styleEl)
 }

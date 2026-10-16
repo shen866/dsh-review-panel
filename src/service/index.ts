@@ -28,7 +28,7 @@ export default class ReviewPanelService extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'reviewPanel')
     this.config = config
-    const dir = (config.storageDir ?? '~/.dsh-code-review').replace(/^~(?=$|\/)/, homedir())
+    const dir = (config.storageDir ?? '~/.dsh-review-panel').replace(/^~(?=$|\/)/, homedir())
     this.reviewStore = new ReviewStore(dir)
   }
 

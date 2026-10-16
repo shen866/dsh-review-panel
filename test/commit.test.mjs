@@ -185,3 +185,29 @@ test('a whitespace-only explicit message falls back to generation', async () => 
   assert.equal(run.message, 'fix: 处理空值')
   assert.equal(deps.calls.started, 1)
 })
+
+test('a message-only run generates the message and never touches git', async () => {
+  const deps = fakeDeps(completed('fix: 处理空值'))
+  const runner = new CommitRunner(deps)
+  const run = runner.start(changeSet, { push: false, messageOnly: true })
+  assert.equal(run.status, 'running')
+  await run.settled
+  assert.equal(run.status, 'done')
+  assert.equal(run.message, 'fix: 处理空值')
+  assert.equal(run.commit, undefined)
+  assert.equal(run.pushed, false)
+  assert.deepEqual(deps.calls.committed, [])
+  assert.deepEqual(deps.calls.pushed, [])
+  assert.deepEqual(deps.calls.cleared, [])
+})
+
+test('message-only ignores a caller-supplied message and always generates', async () => {
+  const deps = fakeDeps(completed('fix: 处理空值'))
+  const runner = new CommitRunner(deps)
+  const run = runner.start(changeSet, { push: false, messageOnly: true, message: 'docs: 手写信息' })
+  await run.settled
+  assert.equal(run.status, 'done')
+  assert.equal(run.message, 'fix: 处理空值')
+  assert.equal(deps.calls.started, 1)
+  assert.deepEqual(deps.calls.committed, [])
+})

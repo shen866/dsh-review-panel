@@ -385,6 +385,58 @@ export function commitStartRoute(
   }
 }
 
+/**
+ * `POST /review-panel/api/commit/message?session=&provider=&model=` — start
+ * a run that ONLY generates the commit message from the working-tree diff
+ * (no git operations, conflicts irrelevant). `provider`/`model` follow the
+ * same pair rule as the review start route; absent (or empty), the host's
+ * default model selection is used. Responds `{ id }`; poll the commit status
+ * route for the generated `message`.
+ */
+export function commitMessageRoute(
+  reviewPanel: ReviewPanelService,
+  runner: CommitRunner,
+  workspaces?: WorkspaceRegistrySource,
+): WebServerRoute {
+  return {
+    kind: 'exact',
+    path: '/review-panel/api/commit/message',
+    handler: async (req, res) => {
+      try {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'POST required' })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const provider = url.searchParams.get('provider') || null
+        const model = url.searchParams.get('model') || null
+        if ((provider === null) !== (model === null)) {
+          sendJson(res, 400, { error: 'provider 和 model 必须同时指定' })
+          return
+        }
+        const selection = provider !== null && model !== null ? { provider, model } : undefined
+        const repo = await resolveRepo(url, workspaces)
+        if ('error' in repo) {
+          sendJson(res, repo.status, { error: repo.error })
+          return
+        }
+        const changeSet = await reviewPanel.collect({ cwd: repo.cwd, scope: 'working-tree' })
+        if (changeSet.repo && changeSet.repo.isRepo === false) {
+          sendJson(res, 400, { error: '当前目录不是 git 仓库，无法生成 commit 信息' })
+          return
+        }
+        if (changeSet.files.length === 0) {
+          sendJson(res, 400, { error: '工作区没有未提交的变更，无需生成 commit 信息' })
+          return
+        }
+        sendJson(res, 200, { id: runner.start(changeSet, { push: false, messageOnly: true }, selection).id })
+      } catch (error) {
+        sendInternalError(res, error)
+      }
+    },
+  }
+}
+
 /** The JSON shape for the commit status route (never `settled`). */
 function commitToJson(run: CommitRun) {
   return {

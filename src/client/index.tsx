@@ -1,4 +1,4 @@
-//! dsh-code-review client bundle entry — compiles to lib/client.js (tsdown),
+//! dsh-review-panel client bundle entry — compiles to lib/client.js (tsdown),
 //! the artifact referenced by package.json exports["./client"]. Registers a
 //! page-type tab into the host right sidebar:
 //!   1. the tab type into `ctx.sidebarRightTabs` (stage one), with a guide

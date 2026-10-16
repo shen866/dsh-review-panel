@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsdown'
 
 // The bundle keeps the host contract: a single script wrapped in
-// `window.__ModuleLoader__.load({ id: 'dsh-code-review', factory })` whose
+// `window.__ModuleLoader__.load({ id: 'dsh-review-panel', factory })` whose
 // module table only provides `react` / `react/jsx-runtime` (both external).
 // The banner/footer inject that wrapper around rolldown's CJS chunk.
 export default defineConfig({
@@ -17,7 +17,7 @@ export default defineConfig({
   sourcemap: false,
   dts: false,
   banner: `window.__ModuleLoader__.load({
-  id: 'dsh-code-review',
+  id: 'dsh-review-panel',
   factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;`,
