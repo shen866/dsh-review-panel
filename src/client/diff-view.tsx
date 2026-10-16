@@ -81,17 +81,6 @@ export const styles: Record<string, CSSProperties> = {
     cursor: 'pointer',
     flexShrink: 0,
   },
-  modelSelect: {
-    fontSize: '11px',
-    padding: '2px 4px',
-    borderRadius: '6px',
-    border: '1px solid ' + COLORS.border,
-    background: 'transparent',
-    color: 'inherit',
-    maxWidth: '160px',
-    flexShrink: 1,
-    minWidth: 0,
-  },
   headerMeta: { marginTop: '2px', fontSize: '11px', opacity: .6 },
   reviewBox: {
     flexShrink: 0,

@@ -4,7 +4,7 @@
 //! so the slot framework passes the session id in props; the host maps it
 //! to the session workspace's repo path.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import type { ReviewFinding } from '../review/findings.js'
 import {
@@ -23,6 +23,294 @@ const POLL_MS = 4000
 const MODEL_KEY = 'dsh-code-review:model'
 const MARKS_KEY = 'dsh-code-review:marks:'
 const MAX_REVIEW_POLL_FAILURES = 5
+
+/**
+ * Case-insensitive ordered-subsequence rank of `query` against `name`, in the
+ * spirit of the host picker: exact prefix wins, then subsequence matches by
+ * first-hit offset; -1 means no match. Lower is better, ties keep catalog order.
+ */
+function rankByQuery(name: string, query: string): number {
+  const text = name.toLowerCase()
+  const wanted = query.trim().toLowerCase()
+  if (!wanted) return 0
+  if (text.startsWith(wanted)) return 1
+  let from = 0
+  for (const char of wanted) {
+    const at = text.indexOf(char, from)
+    if (at < 0) return -1
+    from = at + 1
+  }
+  return 2 + text.indexOf(wanted.charAt(0))
+}
+
+// The picker's hover/sticky/fixed-position styling follows the host `/model`
+// popup, which class-based CSS provides; inject it once like the host client
+// modules inject their plugin CSS.
+let modelPickerCssInjected = false
+function ensureModelPickerCss() {
+  if (modelPickerCssInjected || typeof document === 'undefined') return
+  modelPickerCssInjected = true
+  const tag = document.createElement('style')
+  tag.dataset.pluginCss = 'dsh-code-review/model-picker'
+  tag.textContent = `
+.dsh-crp-modelRoot{position:relative;min-width:0;flex-shrink:1}
+.dsh-crp-modelTrigger{display:flex;align-items:center;gap:4px;height:24px;max-width:200px;padding:0 4px 0 8px;border:none;border-radius:6px;background:transparent;color:inherit;font-size:12px;line-height:20px;cursor:pointer;min-width:0}
+.dsh-crp-modelTrigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.10))}
+.dsh-crp-modelTrigger:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color, #0969da)}
+.dsh-crp-modelTrigger:disabled{opacity:.5;cursor:default}
+.dsh-crp-modelTriggerLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.dsh-crp-modelChevron{flex:none;font-size:10px;opacity:.6;transition:transform .12s}
+.dsh-crp-modelChevronOpen{transform:rotate(180deg)}
+.dsh-crp-modelMenu{position:fixed;z-index:1100;display:flex;flex-direction:column;padding:4px;min-width:200px;max-width:min(320px, calc(100vw - 32px));max-height:min(360px, calc(100vh - 96px));overflow:hidden;background:var(--dsh-bg, #fff);color:inherit;border:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.25));border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.dsh-crp-modelSearchRow{position:relative;flex-shrink:0;margin:2px 0 3px}
+.dsh-crp-modelSearch{width:100%;box-sizing:border-box;padding:5px 24px 5px 7px;border:none;border-radius:6px;background:transparent;color:inherit;font-size:12px;outline:none}
+.dsh-crp-modelSearch::placeholder{color:inherit;opacity:.45}
+.dsh-crp-modelSearch:focus{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l1, rgba(128,128,128,.25))}
+.dsh-crp-modelSearchClear{position:absolute;top:50%;right:4px;transform:translateY(-50%);width:20px;height:20px;padding:0;border:none;border-radius:50%;background:transparent;color:inherit;opacity:.6;cursor:pointer;font-size:10px;line-height:1}
+.dsh-crp-modelSearchClear:hover{opacity:1}
+.dsh-crp-modelGroups{min-height:0;overflow-y:auto;padding-bottom:2px}
+.dsh-crp-modelGroupLabel{position:sticky;top:0;z-index:1;padding:4px 8px 2px;font-size:11px;opacity:.55;background:var(--dsh-bg, #fff)}
+.dsh-crp-modelOption{display:flex;align-items:center;gap:6px;box-sizing:border-box;width:100%;min-height:30px;padding:4px 8px;border:none;border-radius:6px;background:transparent;color:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-crp-modelOption:hover,.dsh-crp-modelOptionActive{background:var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.10))}
+.dsh-crp-modelName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-crp-modelCheck{flex:none;width:14px;text-align:center;font-size:12px}
+.dsh-crp-modelEmpty{padding:8px;font-size:12px;opacity:.55}
+`
+  document.head.appendChild(tag)
+}
+
+interface ModelRow { groupId: string; groupName: string; value: string; label: string }
+
+/**
+ * Model picker styled after the host `/model` dialog: a quiet trigger button
+ * opens a popup with a search field and a provider-grouped model list (sticky
+ * group headers, check mark on the current choice, keyboard navigation that
+ * keeps focus in the search field). `value` is the "provider/model" string;
+ * '' is the host default.
+ */
+function ModelPicker(props: { models: ModelsBody; value: string; disabled: boolean; onPick: (value: string) => void }) {
+  const { models, value, disabled, onPick } = props
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [active, setActive] = useState(0)
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
+  ensureModelPickerCss()
+
+  const defaultLabel = models.default
+    ? '默认（' + models.default.provider + '/' + models.default.model + '）'
+    : '默认模型'
+
+  // Provider groups, each filtered/sorted by the search query, with the
+  // host-default row first — the one extra group the review flow needs.
+  const groups = useMemo(() => {
+    const list: { id: string; name: string; rows: ModelRow[] }[] = [
+      { id: '', name: '默认', rows: [{ groupId: '', groupName: '默认', value: '', label: defaultLabel }] },
+    ]
+    for (const provider of models.providers) {
+      const rows = provider.models
+        .map((model) => ({ model, rank: rankByQuery(model.name, query) }))
+        .filter((entry) => entry.rank >= 0)
+        .sort((left, right) => left.rank - right.rank)
+        .map((entry): ModelRow => ({
+          groupId: provider.id,
+          groupName: provider.name,
+          value: provider.id + '/' + entry.model.id,
+          label: entry.model.name,
+        }))
+      if (rows.length > 0) list.push({ id: provider.id, name: provider.name, rows })
+    }
+    return list
+  }, [models, query, defaultLabel])
+
+  const rows = useMemo(() => groups.flatMap((group) => group.rows), [groups])
+  const activeIndex = Math.min(active, Math.max(0, rows.length - 1))
+  const activeRow = rows.length > 0 ? rows[activeIndex] : undefined
+
+  // The trigger shows the catalog name when the choice resolves, else the raw
+  // "provider/model" id, else the default label.
+  const currentLabel = useMemo(() => {
+    if (!value) return defaultLabel
+    const slash = value.indexOf('/')
+    const provider = models.providers.find((entry) => entry.id === value.slice(0, slash))
+    const model = provider && provider.models.find((entry) => entry.id === value.slice(slash + 1))
+    return model ? model.name : value
+  }, [value, models, defaultLabel])
+
+  const close = useCallback((restoreFocus: boolean) => {
+    setOpen(false)
+    if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
+  }, [])
+
+  const pick = useCallback((row: ModelRow) => {
+    onPick(row.value)
+    close(true)
+  }, [onPick, close])
+
+  const show = useCallback(() => {
+    setQuery('')
+    const index = rows.findIndex((row) => row.value === value)
+    setActive(index < 0 ? 0 : index)
+    setOpen(true)
+    // Opening loads nothing here (the catalog loads once at mount), but the
+    // focus move mirrors the host picker: a drilled pane focuses its search.
+    queueMicrotask(() => { searchRef.current?.focus() })
+  }, [rows, value])
+
+  // Close on a click outside the trigger and the popup.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => {
+      const target = event.target
+      if (target instanceof Node && rootRef.current?.contains(target)) return
+      if (target instanceof Node && menuRef.current?.contains(target)) return
+      close(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => { document.removeEventListener('mousedown', onDown) }
+  }, [open, close])
+
+  // Place the popup above the trigger, right edges aligned, like the host
+  // composer menu; clamp it into the viewport and follow scroll/resize.
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPos(null)
+      return
+    }
+    const place = () => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const width = menuRef.current?.offsetWidth ?? 0
+      const height = menuRef.current?.offsetHeight ?? 0
+      const margin = 12
+      let x = rect.right - width
+      let y = rect.top - 8 - height
+      if (width > 0) x = Math.min(Math.max(x, margin), window.innerWidth - width - margin)
+      if (height > 0) y = Math.min(Math.max(y, margin), window.innerHeight - height - margin)
+      setMenuPos({ left: x, top: y })
+    }
+    place()
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [open, query, groups])
+
+  // Keep the highlighted row visible while arrowing through the list.
+  useLayoutEffect(() => {
+    if (open) itemRefs.current[activeIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
+
+  const onSearchKeyDown = (event: any) => {
+    if (event.nativeEvent && event.nativeEvent.isComposing) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (rows.length === 0) return
+      setActive((activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length)
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      if (activeRow) pick(activeRow)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      close(true)
+    } else if (event.key === 'Tab') {
+      // Keep Tab inside the popup like the host picker: leave on shift only.
+      if (event.shiftKey) {
+        event.preventDefault()
+        close(true)
+      }
+    }
+  }
+
+  itemRefs.current = []
+  let rowIndex = 0
+  return (
+    <div ref={rootRef} className="dsh-crp-modelRoot" title="检视使用的模型">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="dsh-crp-modelTrigger"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => { open ? close(true) : show() }}
+      >
+        <span className="dsh-crp-modelTriggerLabel">{currentLabel}</span>
+        <span className={'dsh-crp-modelChevron' + (open ? ' dsh-crp-modelChevronOpen' : '')}>▾</span>
+      </button>
+      {open ? (
+        <div
+          ref={menuRef}
+          className="dsh-crp-modelMenu"
+          role="menu"
+          aria-label="选择检视模型"
+          style={menuPos ?? { visibility: 'hidden' as const, left: 0, top: 0 }}
+        >
+          <div className="dsh-crp-modelSearchRow">
+            <input
+              ref={searchRef}
+              className="dsh-crp-modelSearch"
+              type="text"
+              role="searchbox"
+              placeholder="搜索模型…"
+              value={query}
+              onChange={(event: any) => { setQuery(event.target.value); setActive(0) }}
+              onKeyDown={onSearchKeyDown}
+            />
+            {query ? (
+              <button
+                type="button"
+                className="dsh-crp-modelSearchClear"
+                title="清除搜索"
+                onClick={() => { setQuery(''); setActive(0); searchRef.current?.focus() }}
+              >
+                ✕
+              </button>
+            ) : null}
+          </div>
+          <div className="dsh-crp-modelGroups">
+            {groups.map((group) => (
+              <div key={group.id || '__default__'}>
+                <div className="dsh-crp-modelGroupLabel">{group.name}</div>
+                {group.rows.map((row) => {
+                  const index = rowIndex++
+                  const selected = row.value === value
+                  return (
+                    <button
+                      key={row.value || '__default__'}
+                      ref={(node: HTMLButtonElement | null) => { itemRefs.current[index] = node }}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      className={'dsh-crp-modelOption' + (index === activeIndex ? ' dsh-crp-modelOptionActive' : '')}
+                      title={row.label}
+                      onMouseEnter={() => { setActive(index) }}
+                      onClick={() => { pick(row) }}
+                    >
+                      <span className="dsh-crp-modelName">{row.label}</span>
+                      <span className="dsh-crp-modelCheck">{selected ? '✓' : ''}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            ))}
+            {rows.length === 0 ? (
+              <div className="dsh-crp-modelEmpty" role="status">
+                {models.providers.length > 0 ? '没有匹配的模型。' : '没有可用的模型。'}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   const sessionId = props && props.sessionId
@@ -85,8 +373,7 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   }))
   const effectiveChoice = choiceValid ? choice : ''
 
-  const pickModel = useCallback((event: any) => {
-    const value = event.target.value
+  const pickModel = useCallback((value: string) => {
     setChoice(value)
     try { localStorage.setItem(MODEL_KEY, value) } catch {}
   }, [])
@@ -440,29 +727,13 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   } else {
     let modelPicker: any = null
     if (models && models.providers.some((provider) => provider.models.length > 0)) {
-      const options = [
-        <option key="" value="">
-          {models.default
-            ? '默认（' + models.default.provider + '/' + models.default.model + '）'
-            : '默认模型'}
-        </option>,
-      ]
-      models.providers.forEach((provider) => {
-        provider.models.forEach((model) => {
-          const value = provider.id + '/' + model.id
-          options.push(<option key={value} value={value} title={model.name}>{value}</option>)
-        })
-      })
       modelPicker = (
-        <select
-          style={styles.modelSelect}
+        <ModelPicker
+          models={models}
           value={effectiveChoice}
           disabled={!!(review && review.status === 'running')}
-          title="检视使用的模型"
-          onChange={pickModel}
-        >
-          {options}
-        </select>
+          onPick={pickModel}
+        />
       )
     }
     const repo = data.repo
