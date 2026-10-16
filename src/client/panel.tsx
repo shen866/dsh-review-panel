@@ -559,8 +559,9 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     return () => { if (typeof document !== 'undefined') document.removeEventListener('keydown', onKey) }
   }, [commitOpen, commit])
 
-  // Poll a running commit until the server finishes (message generation
-  // plus the git operations), then refresh the diff right away.
+  // Poll a running commit run until the server finishes, then refresh the
+  // diff right away. The two modes share the route: a generation run
+  // (messageOnly) only drafts the message; a commit run only runs git.
   const commitRunning = commit && commit.status === 'running'
   const commitId = commit && commit.id
   useEffect(() => {
@@ -576,10 +577,9 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
             if (!prev || prev.id !== body.id) return prev
             return body
           })
-          // The generation finished mid-run: the server exposes the message
-          // before it commits, so surface it in the (disabled) input for a
-          // moment instead of committing with invisible text. A user-typed
-          // draft always wins; the input is disabled while running anyway.
+          // A generation run exposes the message while still running, so
+          // surface it in the input the moment it exists; a user-typed draft
+          // always wins (the input is disabled while running anyway).
           if (body.status === 'running' && body.message) {
             setCommitMsg((prev) => prev || body.message)
           }
@@ -974,9 +974,9 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
         statusLine = <span style={styles.modalError}>{commitWarn}</span>
       } else if (commit) {
         if (commit.status === 'running') {
-          // Generation runs surface '正在生成'; commit runs with a message
-          // in hand go straight to the git phase.
-          statusLine = commitMode === 'message' || !commit.message
+          // Generation and commit are separate steps: a running generation
+          // run says so; a running commit run goes straight to git.
+          statusLine = commitMode === 'message'
             ? '正在生成 commit 信息…'
             : (commit.pushed ? '正在提交并推送…' : '正在提交…')
         } else if (commit.status === 'error') {

@@ -315,48 +315,33 @@ test('commit start collects the workspace diff and returns the run id', async ()
   const workspaces = () => ({ list: () => [{ path: '/repo/a', sessionIds: ['s-1'] }] })
   const route = commitStartRoute(fakeServiceWithFiles(), runner, workspaces)
   const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?session=s-1' }, res)
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?session=s-1&message=' + encodeURIComponent('fix: 处理空值') }, res)
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.id, 'commit-1')
   assert.equal(runner.started[0].changeSet.cwd, '/repo/a')
-  assert.deepEqual(runner.started[0].options, { push: false })
-  assert.equal(runner.started[0].selection, undefined)
+  assert.deepEqual(runner.started[0].options, { push: false, message: 'fix: 处理空值' })
 })
 
-test('commit start forwards the push flag and an explicit provider/model pair', async () => {
+test('commit start forwards the push flag', async () => {
   const runner = fakeCommitRunner()
   const route = commitStartRoute(fakeServiceWithFiles(), runner)
   const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?push=1&provider=openai&model=gpt-5' }, res)
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?push=1&message=' + encodeURIComponent('feat: 新功能') }, res)
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(runner.started[0].options, { push: true })
-  assert.deepEqual(runner.started[0].selection, { provider: 'openai', model: 'gpt-5' })
+  assert.deepEqual(runner.started[0].options, { push: true, message: 'feat: 新功能' })
 })
 
-test('commit start forwards a non-empty message and omits a blank one', async () => {
+test('commit start rejects a missing or blank message instead of generating one', async () => {
   const runner = fakeCommitRunner()
   const route = commitStartRoute(fakeServiceWithFiles(), runner)
-  const withMessage = mockRes()
-  await route.handler({
-    method: 'POST',
-    url: '/review-panel/api/commit/start?message=' + encodeURIComponent('  fix: 手写信息\n'),
-  }, withMessage)
-  assert.equal(withMessage.statusCode, 200)
-  assert.deepEqual(runner.started[0].options, { push: false, message: '  fix: 手写信息\n' })
-
+  const missing = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, missing)
+  assert.equal(missing.statusCode, 400)
+  assert.match(missing.body.error, /缺少 commit 信息/)
   const blank = mockRes()
   await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?message=+%20' }, blank)
-  assert.equal(blank.statusCode, 200)
-  assert.deepEqual(runner.started[1].options, { push: false })
-})
-
-test('commit start still requires provider and model as a pair', async () => {
-  const runner = fakeCommitRunner()
-  const route = commitStartRoute(fakeServiceWithFiles(), runner)
-  const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?provider=openai' }, res)
-  assert.equal(res.statusCode, 400)
-  assert.match(res.body.error, /同时指定/)
+  assert.equal(blank.statusCode, 400)
+  assert.match(blank.body.error, /缺少 commit 信息/)
   assert.equal(runner.started.length, 0)
 })
 
@@ -364,7 +349,7 @@ test('commit start rejects when there is nothing to commit', async () => {
   const runner = fakeCommitRunner()
   const route = commitStartRoute(fakeService(), runner)
   const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?message=' + encodeURIComponent('fix: 处理空值') }, res)
   assert.equal(res.statusCode, 400)
   assert.match(res.body.error, /无需提交/)
   assert.equal(runner.started.length, 0)
@@ -559,7 +544,7 @@ test('commit start rejects a directory with unresolved conflicts', async () => {
     runner,
   )
   const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?message=' + encodeURIComponent('fix: 处理空值') }, res)
   assert.equal(res.statusCode, 400)
   assert.match(res.body.error, /冲突/)
   assert.equal(runner.started.length, 0)
@@ -575,7 +560,7 @@ test('commit start still works while a merge finishes without conflicts', async 
     runner,
   )
   const res = mockRes()
-  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start' }, res)
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?message=' + encodeURIComponent('fix: 处理空值') }, res)
   assert.equal(res.statusCode, 200)
   assert.equal(runner.started.length, 1)
 })

@@ -1,12 +1,11 @@
 /**
- * One-shot "generate a commit message, then commit (and optionally push)"
- * runs. The message normally comes from an independent subagent reading the
- * working tree diff (same spawn pattern as ReviewRunner); a caller-supplied
- * message skips the generation. A run can also stop after the generation
- * step (messageOnly) so the panel can draft a message before committing.
- * The git operations run server-side afterwards. At most one running commit
- * per repo. The git calls are injectable so tests never touch a real
- * repository.
+ * One-shot commit-message and commit runs. Generation and committing are two
+ * independent actions: a `messageOnly` run has an independent subagent read
+ * the working tree diff (same spawn pattern as ReviewRunner) and draft a
+ * message, touching nothing else; a commit run requires a caller-supplied
+ * message and never generates — an absent one fails the run. The git
+ * operations run server-side afterwards. At most one running commit per
+ * repo. The git calls are injectable so tests never touch a real repository.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -108,10 +107,11 @@ export class CommitRunner {
 
   /**
    * Starts a commit run, or returns the already-running one for the same repo.
-   * A non-empty `options.message` is used verbatim and skips the message
-   * generation subagent entirely; an empty/absent one triggers generation.
-   * `options.messageOnly` stops the run right after generation: the message is
-   * exposed on the run (and via the status route) and no git operation runs.
+   * Generation and commit are independent actions: `options.messageOnly`
+   * starts a generation-only run (the subagent drafts the message, no git
+   * operation runs); a commit run REQUIRES a non-empty `options.message`,
+   * which is used verbatim — an absent one fails the run instead of
+   * generating.
    */
   start(
     changeSet: ChangeSet,
@@ -163,6 +163,10 @@ export class CommitRunner {
     try {
       if (givenMessage) {
         message = givenMessage
+      } else if (!messageOnly) {
+        // Commit runs never generate: the caller must have produced a message
+        // via a generation-only run (or typed one) beforehand.
+        throw new Error('缺少 commit 信息：提交前请先生成或填写')
       } else {
         const agents = this.deps.agents()
         const subagents = this.deps.subagents()

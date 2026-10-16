@@ -325,14 +325,12 @@ export function reviewLatestRoute(
 }
 
 /**
- * `POST /review-panel/api/commit/start?session=&push=&message=&provider=&model=` —
- * commit the working tree; `push=1` (or `true`) also pushes afterwards. The
- * commit message is generated from the diff by a subagent unless `message`
- * carries a non-empty one, which is then used verbatim (generation skipped).
- * `provider`/`model` follow the same pair rule as the review start route;
- * the generation step only needs them (plus the host default) when no
- * `message` was given. Responds `{ id }`; poll the status route for the
- * outcome.
+ * `POST /review-panel/api/commit/start?session=&push=&message=` — commit the
+ * working tree with the caller-supplied `message` (used verbatim); `push=1`
+ * (or `true`) also pushes afterwards. Generation is a separate step
+ * (`/commit/message`), so a missing/blank `message` is rejected with 400
+ * instead of being auto-generated. Responds `{ id }`; poll the status route
+ * for the outcome.
  */
 export function commitStartRoute(
   reviewPanel: ReviewPanelService,
@@ -349,16 +347,13 @@ export function commitStartRoute(
           return
         }
         const url = new URL(req.url ?? '/', 'http://localhost')
-        const provider = url.searchParams.get('provider') || null
-        const model = url.searchParams.get('model') || null
-        if ((provider === null) !== (model === null)) {
-          sendJson(res, 400, { error: 'provider 和 model 必须同时指定' })
-          return
-        }
-        const selection = provider !== null && model !== null ? { provider, model } : undefined
         const push = url.searchParams.get('push') === '1' || url.searchParams.get('push') === 'true'
         const given = url.searchParams.get('message')
         const message = given && given.trim() ? given : undefined
+        if (message === undefined) {
+          sendJson(res, 400, { error: '缺少 commit 信息：请先调用 /commit/message 生成，或在提交前填写' })
+          return
+        }
         const repo = await resolveRepo(url, workspaces)
         if ('error' in repo) {
           sendJson(res, repo.status, { error: repo.error })
@@ -377,7 +372,7 @@ export function commitStartRoute(
           sendJson(res, 400, { error: '工作区没有未提交的变更，无需提交' })
           return
         }
-        sendJson(res, 200, { id: runner.start(changeSet, { push, ...(message !== undefined ? { message } : {}) }, selection).id })
+        sendJson(res, 200, { id: runner.start(changeSet, { push, message }).id })
       } catch (error) {
         sendInternalError(res, error)
       }
