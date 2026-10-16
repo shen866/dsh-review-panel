@@ -161,3 +161,27 @@ test('a second start on the same repo reuses the running commit', async () => {
   await first.settled
   assert.equal(deps.calls.started, 1)
 })
+
+test('an explicit message is used verbatim and skips the generation subagent', async () => {
+  const deps = fakeDeps(completed('generated: 不应使用'))
+  const runner = new CommitRunner(deps)
+  const run = runner.start(changeSet, { push: true, message: '  docs: 手写信息\n' })
+  await run.settled
+  assert.equal(run.status, 'done')
+  assert.equal(run.message, 'docs: 手写信息')
+  assert.equal(deps.calls.created, 0)
+  assert.equal(deps.calls.started, 0)
+  assert.deepEqual(deps.calls.committed, [{ cwd: '/repo/a', message: 'docs: 手写信息' }])
+  assert.deepEqual(deps.calls.pushed, ['/repo/a'])
+  assert.deepEqual(deps.calls.cleared, ['/repo/a'])
+})
+
+test('a whitespace-only explicit message falls back to generation', async () => {
+  const deps = fakeDeps(completed('fix: 处理空值'))
+  const runner = new CommitRunner(deps)
+  const run = runner.start(changeSet, { push: false, message: '   ' })
+  await run.settled
+  assert.equal(run.status, 'done')
+  assert.equal(run.message, 'fix: 处理空值')
+  assert.equal(deps.calls.started, 1)
+})

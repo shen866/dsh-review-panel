@@ -332,6 +332,23 @@ test('commit start forwards the push flag and an explicit provider/model pair', 
   assert.deepEqual(runner.started[0].selection, { provider: 'openai', model: 'gpt-5' })
 })
 
+test('commit start forwards a non-empty message and omits a blank one', async () => {
+  const runner = fakeCommitRunner()
+  const route = commitStartRoute(fakeServiceWithFiles(), runner)
+  const withMessage = mockRes()
+  await route.handler({
+    method: 'POST',
+    url: '/review-panel/api/commit/start?message=' + encodeURIComponent('  fix: 手写信息\n'),
+  }, withMessage)
+  assert.equal(withMessage.statusCode, 200)
+  assert.deepEqual(runner.started[0].options, { push: false, message: '  fix: 手写信息\n' })
+
+  const blank = mockRes()
+  await route.handler({ method: 'POST', url: '/review-panel/api/commit/start?message=+%20' }, blank)
+  assert.equal(blank.statusCode, 200)
+  assert.deepEqual(runner.started[1].options, { push: false })
+})
+
 test('commit start still requires provider and model as a pair', async () => {
   const runner = fakeCommitRunner()
   const route = commitStartRoute(fakeServiceWithFiles(), runner)

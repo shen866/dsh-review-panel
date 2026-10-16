@@ -38,6 +38,11 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
   // Finding index the jump buttons last landed on (drives the highlight).
   const [activeFinding, setActiveFinding] = useState<number | null>(null)
   const [commit, setCommit] = useState<CommitState | null>(null)
+  // Commit dialog: open state, the message draft (empty = auto-generate), and
+  // whether the running commit skipped generation by using the draft.
+  const [commitOpen, setCommitOpen] = useState(false)
+  const [commitMsg, setCommitMsg] = useState('')
+  const [commitGiven, setCommitGiven] = useState(false)
   // Indices that anchored at least once; losing the anchor afterwards
   // means the reviewed code was edited, which auto-marks "已修改".
   const everAnchoredRef = useRef<Set<number>>(new Set())
@@ -217,7 +222,10 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     const params = new URLSearchParams()
     if (sessionId) params.set('session', sessionId)
     if (push) params.set('push', '1')
-    if (effectiveChoice) {
+    const message = commitMsg.trim()
+    setCommitGiven(!!message)
+    if (message) params.set('message', commitMsg)
+    if (!message && effectiveChoice) {
       const slash = effectiveChoice.indexOf('/')
       params.set('provider', effectiveChoice.slice(0, slash))
       params.set('model', effectiveChoice.slice(slash + 1))
@@ -227,7 +235,17 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
       .then(readJson)
       .then((body) => { setCommit({ id: body.id, status: 'running', pushed: push }) },
         (err) => { setCommit({ status: 'error', error: String(err && err.message || err) }) })
-  }, [sessionId, commit, effectiveChoice])
+  }, [sessionId, commit, commitMsg, effectiveChoice])
+
+  // Close the dialog on Escape unless a commit is in flight.
+  useEffect(() => {
+    if (!commitOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !(commit && commit.status === 'running')) setCommitOpen(false)
+    }
+    if (typeof document !== 'undefined') document.addEventListener('keydown', onKey)
+    return () => { if (typeof document !== 'undefined') document.removeEventListener('keydown', onKey) }
+  }, [commitOpen, commit])
 
   // Poll a running commit until the server finishes (message generation
   // plus the git operations), then refresh the diff right away.
@@ -272,6 +290,19 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     }, 2000)
     return () => { clearInterval(timer) }
   }, [commitRunning, commitId, sync])
+
+  // A finished commit closes the dialog shortly after showing its result; a
+  // failed one stays open so the error is visible (and the run retryable).
+  const commitDone = !!(commit && commit.status === 'done')
+  useEffect(() => {
+    if (!commitDone) return
+    const timer = setTimeout(() => {
+      setCommitOpen(false)
+      setCommitMsg('')
+      setCommit(null)
+    }, 1500)
+    return () => { clearTimeout(timer) }
+  }, [commitDone])
 
   const toggle = useCallback((path: string) => {
     setClosed((prev) => ({ ...prev, [path]: !prev[path] }))
@@ -598,52 +629,91 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
     )
   }
 
-  // Bottom bar of the changes page: commit the working tree with an
-  // auto-generated message, optionally pushing afterwards. Unresolved
-  // merge conflicts block committing (the server rejects it too) — the
-  // auto-stage would happily record conflict markers as content.
+  // Bottom bar of the changes page: a single commit button that opens the
+  // commit dialog (stats + message + commit/push choices). Unresolved merge
+  // conflicts block committing (the server rejects it too) — the auto-stage
+  // would happily record conflict markers as content.
   let commitBar: any = null
+  let commitModal: any = null
   if (data && data.files.length > 0) {
     const conflicts = data.repo ? data.repo.conflicts.length : 0
-    let note: any = null
-    if (commit) {
-      if (commit.status === 'running') {
-        note = commit.pushed ? '正在生成 commit 信息并提交、推送…' : '正在生成 commit 信息并提交…'
-      } else if (commit.status === 'error') {
-        note = <span style={{ color: COLORS.del }}>{'提交失败：' + (commit.error || '未知错误')}</span>
-      } else {
-        note = '已提交 ' + (commit.commit || '') +
-          (commit.pushed ? ' 并推送' : '') +
-          (commit.pushError ? '（推送失败：' + commit.pushError + '）' : '') +
-          (commit.message ? ' · ' + commit.message.split('\n', 1)[0] : '')
-      }
-    }
     commitBar = (
       <div style={styles.commitBar}>
-        <span
-          style={styles.commitNote}
-          title={commit && commit.message ? commit.message : undefined}
-        >
-          {note}
-        </span>
         <button
           style={styles.reviewButton}
           disabled={!!commitRunning || conflicts > 0}
-          title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '自动生成 commit 信息并提交全部变更'}
-          onClick={() => { startCommit(false) }}
+          title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '提交全部变更'}
+          onClick={() => { setCommitOpen(true) }}
         >
-          {commitRunning && commit && commit.pushed === false ? '提交中…' : '提交'}
-        </button>
-        <button
-          style={styles.reviewButton}
-          disabled={!!commitRunning || conflicts > 0}
-          title={conflicts > 0 ? `存在 ${conflicts} 个未解决冲突的文件，无法提交` : '自动生成 commit 信息，提交并推送到远端'}
-          onClick={() => { startCommit(true) }}
-        >
-          {commitRunning && commit && commit.pushed ? '提交并推送中…' : '提交并推送'}
+          提交
         </button>
       </div>
     )
+
+    if (commitOpen) {
+      let additions = 0
+      let deletions = 0
+      for (const file of data.files) {
+        additions += file.additions
+        deletions += file.deletions
+      }
+      let statusLine: any = null
+      if (commit) {
+        if (commit.status === 'running') {
+          statusLine = commitGiven
+            ? (commit.pushed ? '正在提交并推送…' : '正在提交…')
+            : (commit.pushed ? '正在生成 commit 信息并提交、推送…' : '正在生成 commit 信息并提交…')
+        } else if (commit.status === 'error') {
+          statusLine = <span style={styles.modalError}>{'提交失败：' + (commit.error || '未知错误')}</span>
+        } else {
+          statusLine = '已提交 ' + (commit.commit || '') +
+            (commit.pushed ? ' 并推送' : '') +
+            (commit.pushError ? '（推送失败：' + commit.pushError + '）' : '') +
+            (commit.message ? ' · ' + commit.message.split('\n', 1)[0] : '')
+        }
+      }
+      commitModal = (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => { if (!commitRunning) setCommitOpen(false) }}
+        >
+          <div style={styles.modal} onClick={(event: any) => { event.stopPropagation() }}>
+            <div style={styles.modalTitle}>提交变更</div>
+            <div style={styles.modalBody}>
+              <div style={styles.modalStats}>
+                <span>{data.files.length + ' 个文件'}</span>
+                <span style={{ color: COLORS.add }}>{'+' + additions}</span>
+                <span style={{ color: COLORS.del }}>{'-' + deletions}</span>
+              </div>
+              <textarea
+                style={styles.modalInput}
+                value={commitMsg}
+                disabled={!!commitRunning}
+                placeholder="commit 信息（留空自动生成）"
+                onChange={(event: any) => { setCommitMsg(event.target.value) }}
+              />
+              {statusLine ? <div style={styles.modalStatus}>{statusLine}</div> : null}
+            </div>
+            <div style={styles.modalFooter}>
+              <button
+                style={styles.reviewButton}
+                disabled={!!commitRunning}
+                onClick={() => { startCommit(false) }}
+              >
+                提交
+              </button>
+              <button
+                style={styles.reviewButton}
+                disabled={!!commitRunning}
+                onClick={() => { startCommit(true) }}
+              >
+                提交并推送
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
   }
 
   return (
@@ -653,6 +723,7 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
       {data && error ? <div style={styles.syncNote}>{'同步失败，稍后自动重试：' + error}</div> : null}
       {content}
       {commitBar}
+      {commitModal}
     </div>
   )
 }
