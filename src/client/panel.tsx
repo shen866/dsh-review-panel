@@ -264,6 +264,13 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
             if (!prev || prev.id !== body.id) return prev
             return body
           })
+          // The generation finished mid-run: the server exposes the message
+          // before it commits, so surface it in the (disabled) input for a
+          // moment instead of committing with invisible text. A user-typed
+          // draft always wins; the input is disabled while running anyway.
+          if (body.status === 'running' && body.message) {
+            setCommitMsg((prev) => prev || body.message)
+          }
           if (body.status && body.status !== 'running') {
             if (body.status === 'done') {
               // The changes just landed: drop the review (findings can no
@@ -660,9 +667,11 @@ export function ChangesPanelBody(props: { sessionId?: string } | undefined) {
       let statusLine: any = null
       if (commit) {
         if (commit.status === 'running') {
-          statusLine = commitGiven
-            ? (commit.pushed ? '正在提交并推送…' : '正在提交…')
-            : (commit.pushed ? '正在生成 commit 信息并提交、推送…' : '正在生成 commit 信息并提交…')
+          // Two visible phases: the model generates into the input first,
+          // then the git operations run with that text.
+          statusLine = !commitGiven && !commit.message
+            ? '正在生成 commit 信息…'
+            : (commit.pushed ? '正在提交并推送…' : '正在提交…')
         } else if (commit.status === 'error') {
           statusLine = <span style={styles.modalError}>{'提交失败：' + (commit.error || '未知错误')}</span>
         } else {
